@@ -1,0 +1,13 @@
+{
+  "name": "codebuddy-proxy",
+  "version": "1.0.0",
+  "description": "CodeBuddy反代理",
+  "license": "MIT",
+  "author": "MrWhat",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  }
+}
