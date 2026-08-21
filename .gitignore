@@ -1,0 +1,9 @@
+# 依赖
+node_modules/
+
+# 前端构建产物（运行前需 `npm run build`）
+dist/
+
+# 系统
+.DS_Store
+*.log

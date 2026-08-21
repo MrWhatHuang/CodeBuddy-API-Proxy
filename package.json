@@ -1,13 +1,29 @@
 {
   "name": "codebuddy-proxy",
-  "version": "1.0.0",
-  "description": "CodeBuddy反代理",
+  "version": "1.1.0",
+  "description": "CodeBuddy API Proxy：把本地 CodeBuddy 登录态代理为 OpenAI 兼容接口，附 Vite+Vue 管理页",
   "license": "MIT",
   "author": "MrWhat",
   "type": "commonjs",
   "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "vite --config web/vite.config.mjs",
+    "build": "vite build --config web/vite.config.mjs",
+    "preview": "vite preview --config web/vite.config.mjs",
+    "test": "node --check server.js && node --check core/index.js && node --check core/store.js && node --check core/routes.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "dependencies": {
+    "alova": "^3.5.0",
+    "vue": "^3.5.0",
+    "vue-i18n": "^11.0.0",
+    "vue-router": "^4.6.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.0",
+    "vite": "^6.4.0"
   }
 }

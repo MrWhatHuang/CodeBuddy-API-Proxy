@@ -1,60 +1,94 @@
 # CodeBuddy API Proxy
 
-把本地 VSCode 里 **腾讯云 CodeBuddy** 插件的登录态 / API 代理成一个 **OpenAI 兼容接口**，供其它 agent 工具（Cursor、Continue、OpenAI SDK 客户端等）直接调用。
+把本地 VSCode 里 **腾讯云 CodeBuddy** 插件的登录态 / API 代理成一个 **OpenAI 兼容接口**，供其它 agent 工具（Cursor、Continue、OpenAI SDK、Codex CLI 等）直接调用。
 
-> 纯 Node 内置模块实现，无需 `npm install`，单文件即可运行。
+服务端只用 Node 内置模块（含 `node:sqlite`）。管理页是 Vite + Vue，构建后由服务从 `dist/` 托管。
 
 ## 核心特性
 
-1. **直接读 VSCode 插件登录态**：启动时自动从 VSCode 的 SecretStorage 里解密出 CodeBuddy 已保存的 token（无需重新登录）。读不到时再走 OAuth 登录。
-2. **启动自动打开管理页** `http://127.0.0.1:3800/home`。
+1. **直接读 VSCode 插件登录态**：启动时自动从 VSCode SecretStorage 解密 CodeBuddy token。读不到再走 OAuth。
+2. **管理页**：`http://127.0.0.1:3800/home`，含总览、模型、日志、系统配置；支持中/英文和浅色/深色。
 3. **OpenAI 兼容**：`/v1/chat/completions`（流式 + 非流式自动聚合）、`/v1/completions`、`/v1/embeddings`。
-4. **Responses API**：`/v1/responses`（OpenAI Responses API 格式，流式 + 非流式），可接 **Codex CLI** 等工具。
+4. **Responses API**：`/v1/responses`，可接 Codex CLI。
+5. **SQLite 日志**：请求摘要、登录、配置变更写入 `~/.codebuddy-proxy/proxy.db`，可在管理页查询。
 
 ## 运行
 
+需要 **Node ≥ 22.5**（内置 `node:sqlite`；实测 Node 24 可用）。
+
 ```bash
-node server.js
+npm install
+npm run build          # 构建管理页到 dist/
+npm start              # node server.js
 ```
 
-> 需要 Node ≥ 22.5（读取 VSCode 密钥用到内置 `node:sqlite`；实测 Node 24 可用）。
-
-启动后浏览器会自动打开管理页。若想关闭自动打开：
+开发管理页（需另开一个终端跑 `npm start`）：
 
 ```bash
-CODEBUDDY_NO_OPEN=1 node server.js
+npm run dev            # Vite :5173，API 代理到 :3800
+```
+
+启动后浏览器会自动打开管理页。关闭自动打开：
+
+```bash
+CODEBUDDY_NO_OPEN=1 npm start
+```
+
+也可以在管理页「系统配置」里关掉「启动后自动打开管理页」。
+
+## 目录
+
+```
+server.js              启动入口
+core/                  服务端逻辑（按职责拆分）
+  index.js             HTTP 服务装配
+  config.js            环境变量 / 默认值
+  store.js             SQLite 日志 + 系统配置
+  logger.js            统一日志
+  session.js           登录态
+  auth.js              OAuth / token 刷新
+  vscode.js            从 VSCode 解密登录态
+  openai.js            /v1/chat/completions 等转发
+  responses.js         /v1/responses 转换
+  models.js            模型目录
+  routes.js            HTTP 路由与静态资源
+  util.js              请求 / 响应工具
+web/                   Vite + Vue 管理页源码
+dist/                  管理页构建产物（服务启动后从此目录托管）
 ```
 
 ## 三个问题的直接回答
 
 ### 1. OAuth 登录后的 refreshToken 存到哪了？
 
-存到本地会话文件 **`~/.codebuddy-proxy/session.json`**（权限 `0600`），里面包含 `auth.accessToken`、`auth.refreshToken`、账号信息等。路径可用 `CODEBUDDY_SESSION_FILE` 覆盖。
+本地会话文件 **`~/.codebuddy-proxy/session.json`**（权限 `0600`），包含 `auth.accessToken`、`auth.refreshToken`、账号信息。路径可用 `CODEBUDDY_SESSION_FILE` 覆盖。
+
+日志和系统配置在 **`~/.codebuddy-proxy/proxy.db`**（可用 `CODEBUDDY_DB_FILE` 覆盖）。
 
 ### 2. 默认能直接取 VSCode 插件保存的 token 吗？
 
 **能。** 启动时优先级：
 
-1. **VSCode 插件 SecretStorage**（macOS 自动解密）—— 本机已验证可用；
+1. **VSCode 插件 SecretStorage**（macOS 自动解密）；
 2. 本地会话文件 `session.json`；
-3. 都没有 → 提示 OAuth 登录。
+3. 都没有 → 管理页提示 OAuth 登录。
 
 实现细节（逆向自插件）：token 存在 VSCode 的 `state.vscdb`（SQLite 表 `ItemTable`）里，key 为
 `secret://{"extensionId":"tencent-cloud.coding-copilot","key":"Tencent-Cloud.coding-copilot.new.accessToken"}`，
 值用 Electron `safeStorage` 加密：`PBKDF2-SHA1(钥匙串密码, "saltysalt", 1003, 16)` 派生 AES-128-CBC 密钥，
 密文前缀 `v10`，IV 为 16 个空格。钥匙串服务名为 `Code Safe Storage`。
-（也支持 Code - Insiders / Cursor / VSCodium / Windsurf / Trae 等目录。）
+也支持 Code - Insiders / Cursor / VSCodium / Windsurf / Trae 等目录。
 
 管理页有「从 VSCode 重新读取」按钮，或调用 `GET /api/import-vscode`。
 
-### 3. 管理页
+### 3. 管理页有什么？
 
-启动自动打开 `http://127.0.0.1:3800/home`，包含：
+启动打开 `http://127.0.0.1:3800/home`：
 
-- 模型列表（18 个，含名称/上下文/tool/vision 标签）
-- 当前登录状态（用户、UID、域名、来源、token 过期时间）
-- 一键复制代理地址
-- 快速测试 curl、接口一览、登录/退出/重读按钮
+- **总览**：登录状态、代理地址、curl 示例、接口一览
+- **模型**：18 个模型（名称 / 上下文 / tool / vision）
+- **日志**：按级别、分类、关键字查询，可展开详情、自动刷新、清空
+- **系统配置**：日志开关、日志详细情况、级别、保留策略、默认/强制模型、请求超时、CORS、自动打开管理页；以及主题和语言（保存在浏览器）
 
 ## 逆向提取的认证机制
 
@@ -106,7 +140,7 @@ curl http://127.0.0.1:3800/v1/chat/completions \
   -d '{"model":"default","messages":[{"role":"user","content":"你好"}]}'
 ```
 
-把其它工具的 base_url 指向 `http://127.0.0.1:3800/v1` 即可。
+把其它工具的 `base_url` 指向 `http://127.0.0.1:3800/v1` 即可。
 
 ## 接 Codex CLI（Responses API）
 
@@ -148,36 +182,44 @@ codex exec "你的任务"
 | `CODEBUDDY_ENDPOINT` | `https://copilot.tencent.com` | 后端地址 |
 | `CODEBUDDY_PREFIX_PATH` | `/plugin` | 认证接口前缀 |
 | `CODEBUDDY_PLATFORM` | `VSCode` | 平台标识 |
+| `CODEBUDDY_DATA_DIR` | `~/.codebuddy-proxy` | 数据目录 |
 | `CODEBUDDY_SESSION_FILE` | `~/.codebuddy-proxy/session.json` | 会话文件 |
-| `CODEBUDDY_FORCE_MODEL` | 空 | 强制替换请求 model |
-| `CODEBUDDY_DEFAULT_MODEL` | `default` | 缺省 model |
+| `CODEBUDDY_DB_FILE` | `~/.codebuddy-proxy/proxy.db` | SQLite 数据库 |
+| `CODEBUDDY_FORCE_MODEL` | 空 | 强制替换请求 model（可被管理页覆盖） |
+| `CODEBUDDY_DEFAULT_MODEL` | `default` | 缺省 model（可被管理页覆盖） |
 | `CODEBUDDY_NO_OPEN` | 空 | 设置则不自动打开管理页 |
+| `CODEBUDDY_DEBUG` | 空 | 设置则把最近一次 Responses 请求 dump 到 `/tmp/codebuddy-debug-last.json` |
 
 ## 接口
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/` `/home` | 管理页 |
+| GET | `/` `/home` `/models` `/logs` `/settings` | 管理页（SPA，源码在 `web/`，产物在 `dist/`） |
 | GET | `/api/status` | 状态 JSON |
+| GET | `/api/config` | 系统配置 |
+| PUT | `/api/config` | 更新系统配置 |
+| GET | `/api/logs` | 日志查询（`level`/`category`/`q`/`limit`/`offset`） |
+| DELETE | `/api/logs` | 清空日志 |
+| GET | `/api/stats` | 日志统计 |
 | GET | `/api/import-vscode` | 从 VSCode 重读登录态 |
+| POST | `/api/logout` | 退出登录（JSON） |
 | GET | `/health` | 健康检查 |
 | GET | `/login` | OAuth 登录页 |
-| GET | `/login/state` | 获取登录地址（JSON）|
+| GET | `/login/state` | 获取登录地址（JSON） |
 | GET | `/login/status?state=` | 查询登录进度 |
-| GET | `/logout` | 退出登录 |
+| GET | `/logout` | 退出登录并跳转管理页 |
 | GET | `/v1/models` | 模型列表 |
-| POST | `/v1/responses` | Responses API（Codex 等，流式/非流式）|
-| POST | `/v1/chat/completions` | 对话（流式/非流式）|
+| POST | `/v1/responses` | Responses API（Codex 等，流式/非流式） |
+| POST | `/v1/chat/completions` | 对话（流式/非流式） |
 | POST | `/v1/completions` | 补全 |
 | POST | `/v1/embeddings` | 向量 |
 
 ## 安全提示
 
 - 服务默认只监听 `127.0.0.1`，请勿直接暴露到公网。
-- 会话文件与 `/api/status` 会暴露 token（打码）与账号信息；`/session` 返回明文 token，生产环境建议删掉或加鉴权。
+- 会话文件与 `/api/status` 会暴露 token（打码）与账号信息。
 - 解密 VSCode 密钥需要本机钥匙串访问权限（首次可能弹授权）。
 
 ## License
 
 [MIT](LICENSE)
-
