@@ -119,12 +119,14 @@ requires_openai_auth = true
 base_url = "http://127.0.0.1:3800/v1"
 ```
 
-代理忽略 `OPENAI_API_KEY`，真正鉴权用 CodeBuddy token：
+代理默认忽略 `OPENAI_API_KEY`，真正鉴权用 CodeBuddy token。若设置了 API 密钥（见下文），则客户端必须携带该密钥：
 
 ```bash
-export OPENAI_API_KEY=dummy
+export OPENAI_API_KEY=<你的密钥>   # 或在请求头 X-API-Key 提供
 codex exec "你的任务"
 ```
+
+未设置密钥时，`OPENAI_API_KEY` 可填任意占位值（如 `dummy`）。
 
 实测（Codex CLI 0.148）：文本回复、shell 工具调用、多轮 tool loop 均正常。
 
@@ -147,6 +149,7 @@ codex exec "你的任务"
 | `CODEBUDDY_DB_FILE` | `~/.codebuddy-proxy/proxy.db` | SQLite 数据库 |
 | `CODEBUDDY_FORCE_MODEL` | 空 | 强制替换请求 model |
 | `CODEBUDDY_DEFAULT_MODEL` | `default` | 缺省 model |
+| `CODEBUDDY_API_KEY` | 空 | 客户端访问 `/v1` 与 `/responses` 所需的 API 密钥；空则不校验。也可在管理页「系统配置」里设置 |
 | `CODEBUDDY_NO_OPEN` | 空 | 设置则不自动打开管理页 |
 | `CODEBUDDY_DEBUG` | 空 | 把最近一次 Responses 请求 dump 到 `/tmp/codebuddy-debug-last.json` |
 
@@ -169,6 +172,15 @@ curl -X PUT http://127.0.0.1:3800/api/config \
   }'
 ```
 
+设置 / 清除 API 密钥（设置后客户端访问 `/v1` 与 `/responses` 必须携带）：
+
+```bash
+# 设置密钥
+curl -X PUT http://127.0.0.1:3800/api/config -H "Content-Type: application/json" -d '{"apiKey": "my-secret-key"}'
+# 清除（关闭校验）
+curl -X PUT http://127.0.0.1:3800/api/config -H "Content-Type: application/json" -d '{"apiKey": ""}'
+```
+
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `logging.enabled` | `true` | 是否写入 SQLite 日志 |
@@ -181,6 +193,7 @@ curl -X PUT http://127.0.0.1:3800/api/config \
 | `forceModel` | 空 | 非空则覆盖所有请求的 `model` |
 | `requestTimeoutMs` | `300000` | 上游超时（1s–30min） |
 | `corsOrigin` | `*` | `Access-Control-Allow-Origin` |
+| `apiKey` | 空 | 客户端访问 `/v1` 与 `/responses` 所需的 API 密钥；空 = 不校验 |
 
 日志查询：
 

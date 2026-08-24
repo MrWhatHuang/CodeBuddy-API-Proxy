@@ -65,6 +65,12 @@ function asBool(v, fallback = false) {
   return v === 'true' || v === '1';
 }
 
+function maskKey(k) {
+  if (!k) return '';
+  if (k.length <= 8) return '***';
+  return k.slice(0, 6) + '…' + k.slice(-4);
+}
+
 function asInt(v, fallback = 0) {
   const n = parseInt(v, 10);
   return Number.isFinite(n) ? n : fallback;
@@ -113,6 +119,8 @@ function publicValues(cfg) {
     forceModel: c.forceModel || '',
     requestTimeoutMs: asInt(c.requestTimeoutMs, 300000),
     corsOrigin: c['cors.origin'] || '*',
+    apiKeyEnabled: !!(c.apiKey && c.apiKey.trim()),
+    apiKey: maskKey(c.apiKey),
   };
 }
 
@@ -131,6 +139,12 @@ function applyPublicPatch(body) {
   if (typeof body.autoOpen === 'boolean') patch.autoOpen = String(body.autoOpen);
   if (typeof body.defaultModel === 'string' && body.defaultModel.trim()) patch.defaultModel = body.defaultModel.trim();
   if (typeof body.forceModel === 'string') patch.forceModel = body.forceModel.trim();
+  // API 密钥：空字符串表示清除（关闭校验）；非空则更新
+  if (typeof body.apiKey === 'string') {
+    const key = body.apiKey.trim();
+    if (key) patch.apiKey = key;
+    else patch.apiKey = '';
+  }
   if (typeof body.requestTimeoutMs === 'number') patch.requestTimeoutMs = String(clampInt(body.requestTimeoutMs, 1000, 30 * 60 * 1000));
   if (typeof body.corsOrigin === 'string') {
     const origin = body.corsOrigin.trim() || '*';

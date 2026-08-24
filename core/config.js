@@ -45,6 +45,7 @@ const DEFAULT_CONFIG = {
   'autoOpen': process.env.CODEBUDDY_NO_OPEN ? 'false' : 'true',
   'defaultModel': process.env.CODEBUDDY_DEFAULT_MODEL || 'default',
   'forceModel': process.env.CODEBUDDY_FORCE_MODEL || '',
+  'apiKey': process.env.CODEBUDDY_API_KEY || '',      // 可选：客户端访问 /v1 与 /responses 所需的 API 密钥（空 = 不校验）
   'requestTimeoutMs': '300000',       // 上游请求超时
   'cors.origin': '*',                 // CORS Allow-Origin
 };

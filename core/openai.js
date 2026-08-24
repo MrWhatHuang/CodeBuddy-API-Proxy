@@ -77,6 +77,12 @@ async function handleProxy(req, res, pathname) {
   const upstreamPath = UPSTREAM_MAP[pathname];
   if (!upstreamPath) return false;
 
+  const keyCheck = auth.verifyClientKey(req);
+  if (!keyCheck.ok) {
+    util.sendJson(res, 401, { error: { message: keyCheck.message, type: 'authentication_error' } });
+    return true;
+  }
+
   let body;
   try { body = await util.readBody(req); }
   catch (e) { util.sendJson(res, 400, { error: { message: `read body failed: ${e.message}` } }); return true; }

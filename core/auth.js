@@ -2,9 +2,11 @@
 
 /** 认证逻辑：请求头构建、账号级 token 刷新、OAuth 登录流程（多账号池） */
 
+const crypto = require('crypto');
 const config = require('./config');
 const logger = require('./logger');
 const util = require('./util');
+const store = require('./store');
 const sessionMod = require('./session');
 
 const pendingLogins = new Map();
@@ -245,10 +247,36 @@ async function completeLogin(state, name) {
   }
 }
 
+/**
+ * 校验客户端 API 密钥（可选）。
+ * 当配置了 apiKey 时，请求必须携带 `Authorization: Bearer <key>` 或 `X-API-Key: <key>`。
+ * 返回 { ok: true } 或 { ok: false, message }。未配置密钥时始终放行。
+ */
+function verifyClientKey(req) {
+  const expected = store.getConfig().apiKey;
+  if (!expected || !String(expected).trim()) return { ok: true };
+  const h = (req && req.headers) || {};
+  const authHeader = String(h['authorization'] || h['Authorization'] || '');
+  let provided = '';
+  if (authHeader.startsWith('Bearer ')) provided = authHeader.slice(7).trim();
+  else if (authHeader.startsWith('bearer ')) provided = authHeader.slice(7).trim();
+  else provided = String(h['x-api-key'] || h['X-Api-Key'] || '').trim();
+
+  if (!provided) return { ok: false, message: '缺少 API 密钥（请在 Authorization: Bearer 或 X-API-Key 头提供）' };
+
+  const a = Buffer.from(String(expected).trim());
+  const b = Buffer.from(provided);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return { ok: false, message: 'API 密钥无效' };
+  }
+  return { ok: true };
+}
+
 module.exports = {
   buildNoAuthHeaders, buildAuthHeaders, authPath, isExpiring,
   refreshToken, getValidAccount, getValidSession,
   pickAccountForRequest, extractAccountKey,
+  verifyClientKey,
   fetchAuthState, pollAuthToken, fetchAccount, fetchAccounts, completeLogin,
   importByRefreshToken, fetchAccountByToken,
   pendingLogins,

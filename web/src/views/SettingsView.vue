@@ -21,6 +21,8 @@ const form = reactive({
   forceModel: '',
   requestTimeoutSec: 300,
   corsOrigin: '*',
+  apiKey: '',
+  apiKeyEnabled: false,
 });
 
 watch(cfg, (c) => {
@@ -35,6 +37,8 @@ watch(cfg, (c) => {
   form.forceModel = c.values.forceModel || '';
   form.requestTimeoutSec = Math.round((c.values.requestTimeoutMs || 300000) / 1000);
   form.corsOrigin = c.values.corsOrigin || '*';
+  form.apiKeyEnabled = !!c.values.apiKeyEnabled;
+  form.apiKey = '';
 }, { immediate: true });
 
 const saving = ref(false);
@@ -44,7 +48,7 @@ async function save() {
   saving.value = true;
   saved.value = false;
   try {
-    await api.saveConfig({
+    const patch = {
       logging: {
         enabled: form.loggingEnabled,
         details: form.loggingDetails,
@@ -57,7 +61,10 @@ async function save() {
       forceModel: form.forceModel.trim(),
       requestTimeoutMs: Number(form.requestTimeoutSec) * 1000,
       corsOrigin: form.corsOrigin.trim() || '*',
-    });
+    };
+    if (form.apiKey && form.apiKey.trim()) patch.apiKey = form.apiKey.trim();
+    await api.saveConfig(patch);
+    form.apiKey = '';
     await reload();
     saved.value = true;
     setTimeout(() => { saved.value = false; }, 2000);
@@ -79,6 +86,18 @@ function resetForm() {
   form.forceModel = '';
   form.requestTimeoutSec = 300;
   form.corsOrigin = '*';
+  form.apiKey = '';
+}
+
+async function clearApiKey() {
+  if (!confirm(t('settings.apiKeyClearConfirm'))) return;
+  try {
+    await api.saveConfig({ apiKey: '' });
+    form.apiKey = '';
+    await reload();
+  } catch (e) {
+    alert(`${t('settings.saveError')}: ${e.message}`);
+  }
 }
 
 function onLocaleChange(v) {
@@ -180,6 +199,25 @@ const levels = ['debug', 'info', 'warn', 'error'];
             <span class="slider"></span>
           </label>
         </div>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">{{ t('settings.apiKey') }}</h2>
+        <p class="hint" style="margin-top: -8px">{{ t('settings.apiKeyDesc') }}</p>
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">{{ t('settings.apiKeyCurrent') }}</div>
+            <div class="hint mono">{{ form.apiKeyEnabled ? cfg.values.apiKey : t('settings.apiKeyDisabled') }}</div>
+          </div>
+          <span class="saved-hint" v-if="form.apiKeyEnabled">{{ t('settings.apiKeyEnabled') }}</span>
+        </div>
+        <div class="divider"></div>
+        <div class="field">
+          <label>{{ t('settings.apiKey') }}</label>
+          <input v-model="form.apiKey" type="password" class="input" :placeholder="t('settings.apiKeyPlaceholder')" autocomplete="off" />
+          <p class="hint">{{ t('settings.apiKeyDesc') }}</p>
+        </div>
+        <button v-if="form.apiKeyEnabled" class="btn btn-ghost" style="margin-top: 12px" @click="clearApiKey">{{ t('settings.apiKeyClearBtn') }}</button>
       </div>
 
       <div class="card">

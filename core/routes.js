@@ -353,10 +353,17 @@ async function route(req, res) {
   }
 
   /* ---- 模型列表（内置 + 自定义合并） ---- */
-  if (pathname === '/v1/models') { util.sendJson(res, 200, models.modelsResponse(store.listModels())); return; }
+  if (pathname === '/v1/models') {
+    const keyCheck = auth.verifyClientKey(req);
+    if (!keyCheck.ok) { util.sendJson(res, 401, { error: { message: keyCheck.message, type: 'authentication_error' } }); return; }
+    util.sendJson(res, 200, models.modelsResponse(store.listModels()));
+    return;
+  }
   if (pathname === '/models' && method === 'GET') {
     const accept = String(req.headers.accept || '');
     if (accept.includes('text/html')) { serveIndex(res); return; }
+    const keyCheck = auth.verifyClientKey(req);
+    if (!keyCheck.ok) { util.sendJson(res, 401, { error: { message: keyCheck.message, type: 'authentication_error' } }); return; }
     util.sendJson(res, 200, models.modelsResponse(store.listModels()));
     return;
   }
