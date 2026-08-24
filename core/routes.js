@@ -257,6 +257,11 @@ async function route(req, res) {
 
   /* ---- 从 VSCode 导入登录态 ---- */
   if (pathname === '/api/import-vscode') {
+    // 已添加过（来源为 vscode）则不再重复导入
+    if (sessionMod.listAccounts().some(function (a) { return a.source === 'vscode'; })) {
+      util.sendJson(res, 200, { ok: false, alreadyAdded: true, error: '已从 VSCode 插件读取过账号，无需重复导入' });
+      return;
+    }
     const r = vscode.readVscodeSession();
     if (r && r.session) {
       const acct = sessionMod.addAccount({

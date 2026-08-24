@@ -18,11 +18,16 @@ const importRt = ref('');
 const importName = ref('');
 const importDomain = ref('');
 const importing = ref(false);
+const showVscode = ref(false);
+const importingVscode = ref(false);
 
 const mode = computed({
   get: () => pool.value.mode,
   set: (v) => setMode(v),
 });
+
+// 已存在从 VSCode 插件读取的账号时不重复展示「从插件读取」入口
+const vscodeAccountExists = computed(() => accounts.value.some((a) => a.source === 'vscode'));
 
 async function load() {
   loading.value = true;
@@ -59,6 +64,8 @@ async function pin(id) {
 
 async function openAdd() {
   showAdd.value = true;
+  showImport.value = false;
+  showVscode.value = false;
   newName.value = '';
 }
 
@@ -78,9 +85,37 @@ async function doAdd() {
 async function openImport() {
   showImport.value = true;
   showAdd.value = false;
+  showVscode.value = false;
   importRt.value = '';
   importName.value = '';
   importDomain.value = '';
+}
+
+async function openVscode() {
+  showVscode.value = true;
+  showAdd.value = false;
+  showImport.value = false;
+}
+
+async function doVscodeImport() {
+  importingVscode.value = true;
+  notice.value = '';
+  try {
+    const r = await api.importVscode();
+    if (r.ok) {
+      notice.value = t('accounts.vscodeOk');
+      showVscode.value = false;
+      load();
+    } else {
+      notice.value = r.alreadyAdded ? t('accounts.vscodeAlreadyAdded') : (r.error || t('accounts.vscodeFail'));
+      showVscode.value = false;
+      load();
+    }
+  } catch (e) {
+    notice.value = t('common.error') + ': ' + e.message;
+  } finally {
+    importingVscode.value = false;
+  }
 }
 
 async function doImport() {
@@ -170,6 +205,7 @@ load();
           </span>
         </h2>
         <div class="head-actions">
+          <button v-if="!vscodeAccountExists" class="btn btn-ghost" @click="openVscode">{{ t('accounts.vscode') }}</button>
           <button class="btn btn-ghost" @click="openImport">{{ t('accounts.import') }}</button>
           <button class="btn btn-primary" @click="openAdd">{{ t('accounts.add') }}</button>
         </div>
@@ -256,6 +292,15 @@ load();
       <div class="actions">
         <button class="btn btn-primary" :disabled="importing" @click="doImport">{{ importing ? t('common.saving') : t('accounts.importConfirm') }}</button>
         <button class="btn btn-ghost" @click="showImport = false">{{ t('common.cancel') }}</button>
+      </div>
+    </div>
+
+    <div v-if="showVscode" class="card add-card">
+      <h3 class="card-title">{{ t('accounts.vscodeTitle') }}</h3>
+      <p class="hint">{{ t('accounts.vscodeHint') }}</p>
+      <div class="actions">
+        <button class="btn btn-primary" :disabled="importingVscode" @click="doVscodeImport">{{ importingVscode ? t('accounts.vscodeReading') : t('accounts.vscodeConfirm') }}</button>
+        <button class="btn btn-ghost" @click="showVscode = false">{{ t('common.cancel') }}</button>
       </div>
     </div>
   </div>
