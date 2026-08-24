@@ -51,4 +51,10 @@ export const api = {
   listModels: () => alova.Get('/api/models'),
   addModel: (model) => alova.Post('/api/models', model),
   deleteModel: (id) => alova.Delete(`/api/models/${encodeURIComponent(id)}`),
+  listKeys: () => alova.Get('/api/keys'),
+  addKey: (payload) => alova.Post('/api/keys', payload),
+  regenerateKey: (id) => alova.Post(`/api/keys/regenerate/${encodeURIComponent(id)}`),
+  deleteKey: (id) => alova.Delete(`/api/keys/${encodeURIComponent(id)}`),
+  usage: (params = {}) => alova.Get(withQuery('/api/usage', params)),
+  usageStats: (params = {}) => alova.Get(withQuery('/api/usage/stats', params)),
 };

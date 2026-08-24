@@ -162,13 +162,27 @@ load();
   <div>
     <div class="card">
       <div class="head">
-        <h2 class="card-title">{{ t('accounts.title') }}</h2>
-        <button class="btn btn-primary" @click="openAdd">{{ t('accounts.add') }}</button>
-        <button class="btn btn-ghost" @click="openImport">{{ t('accounts.import') }}</button>
+        <h2 class="card-title">
+          {{ t('accounts.title') }}
+          <span class="tip">
+            <span class="tip-icon">?</span>
+            <span class="tip-text">{{ t('accounts.addHint') }}</span>
+          </span>
+        </h2>
+        <div class="head-actions">
+          <button class="btn btn-ghost" @click="openImport">{{ t('accounts.import') }}</button>
+          <button class="btn btn-primary" @click="openAdd">{{ t('accounts.add') }}</button>
+        </div>
       </div>
 
       <div class="mode-row">
-        <span class="mode-label">{{ t('accounts.mode') }}</span>
+        <span class="mode-label">
+          {{ t('accounts.mode') }}
+          <span class="tip">
+            <span class="tip-icon">?</span>
+            <span class="tip-text">{{ t('accounts.modeHint') }}</span>
+          </span>
+        </span>
         <label class="radio">
           <input type="radio" value="pool" v-model="mode" />
           <span>{{ t('accounts.modePool') }}</span>
@@ -249,12 +263,35 @@ load();
 
 <style scoped>
 .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.head-actions { display: flex; align-items: center; gap: 8px; }
 .mode-row { display: flex; align-items: center; gap: 18px; margin: 8px 0 14px; flex-wrap: wrap; }
 .mode-label { font-size: 13px; color: var(--text-2); font-weight: 600; }
 .radio { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
 .radio input { margin: 0; }
 .hint { font-size: 12px; }
 .notice { margin-top: 10px; }
+
+.tip { position: relative; display: inline-flex; margin-left: 4px; vertical-align: middle; }
+.tip-icon {
+  width: 15px; height: 15px; border-radius: 50%;
+  background: var(--text-2); color: #fff;
+  font-size: 10px; font-weight: 700; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: help;
+}
+.tip-text {
+  position: absolute; top: calc(100% + 8px); left: 0;
+  width: 280px; max-width: 70vw;
+  padding: 9px 11px;
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: 8px;
+  font-size: 12px; font-weight: 400; line-height: 1.5;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  z-index: 40; text-align: left; white-space: normal;
+  visibility: hidden; opacity: 0; pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+.tip:hover .tip-text { visibility: visible; opacity: 1; }
 .table-wrap { overflow-x: auto; }
 tr.pinned td { background: var(--primary-soft); }
 .strong { font-weight: 600; }

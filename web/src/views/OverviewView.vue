@@ -5,48 +5,31 @@ import { useRequest } from 'alova/client';
 import { api } from '@/api';
 import CopyField from '@/components/CopyField.vue';
 import StatCard from '@/components/StatCard.vue';
+import TokenChart from '@/components/TokenChart.vue';
 
 const { t } = useI18n();
 
-const { data: status, loading: loadingStatus, error: statusError, send: reloadStatus } =
-  useRequest(() => api.status());
+const { data: status } = useRequest(() => api.status());
 
-const { data: stats, send: reloadStats } = useRequest(() => api.stats());
+const { data: stats } = useRequest(() => api.stats());
 
-function refreshAll() {
-  reloadStatus();
-  reloadStats();
-}
+const { data: usageStats, send: reloadUsageStats } = useRequest((dim) => api.usageStats({ dimension: dim }), { immediate: false });
+const chartDimension = ref('account');
+const chartLoading = ref(false);
 
-const reimporting = ref(false);
-const loggingOut = ref(false);
-const notice = ref('');
-
-async function reimport() {
-  reimporting.value = true;
-  notice.value = '';
+async function loadChart(dim) {
+  chartDimension.value = dim;
+  chartLoading.value = true;
   try {
-    const r = await api.importVscode();
-    notice.value = r.ok ? t('overview.reimportOk') : (r.error || t('overview.reimportFail'));
-  } catch (e) {
-    notice.value = `${t('common.error')}: ${e.message}`;
+    await reloadUsageStats(dim);
   } finally {
-    reimporting.value = false;
-    refreshAll();
+    chartLoading.value = false;
   }
 }
+loadChart('account');
 
-async function logout() {
-  loggingOut.value = true;
-  try {
-    await api.logout();
-  } catch (e) {
-    notice.value = `${t('common.error')}: ${e.message}`;
-  } finally {
-    loggingOut.value = false;
-    refreshAll();
-  }
-}
+const chartSeries = computed(() => usageStats.value?.series || []);
+const chartDays = computed(() => usageStats.value?.days || []);
 
 const host = computed(() => (typeof window !== 'undefined' ? window.location.host : '127.0.0.1:3800'));
 const baseUrl = computed(() => status.value?.baseUrl || `http://${host.value}`);
@@ -55,22 +38,11 @@ const curlTest = computed(() => `curl -N ${openaiBaseUrl.value}/chat/completions
   -H "Content-Type: application/json" \\
   -d '{"model":"default","stream":true,"messages":[{"role":"user","content":"你好"}]}'`);
 
-const sourceText = computed(() => {
-  const s = status.value?.source;
-  if (s === 'vscode') return t('overview.sourceVscode');
-  if (s === 'oauth') return t('overview.sourceOauth');
-  if (s === 'file') return t('overview.sourceFile');
-  return t('common.unknown');
-});
-
-const poolModeText = computed(() => {
-  const m = status.value?.pool?.mode;
-  return m === 'pinned' ? t('accounts.modePinned') : t('accounts.modePool');
-});
-
-function fmt(ms) {
-  if (!ms) return '-';
-  return new Date(ms).toLocaleString();
+function fmtTokens(n) {
+  if (!n) return '0';
+  if (n >= 1000000) return (n / 1000000).toFixed(2) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+  return String(n);
 }
 
 const apiRows = computed(() => ([
@@ -89,52 +61,40 @@ const apiRows = computed(() => ([
 
 <template>
   <div>
-    <div class="card hero">
-      <h2 class="card-title">
-        <span class="status-dot" :class="{ off: !status?.loggedIn }"></span>
-        {{ t('overview.loginStatus') }}
-        <span class="sub" v-if="status?.endpoint">{{ status.endpoint }}</span>
-      </h2>
-
-      <div v-if="loadingStatus" class="muted">{{ t('common.loading') }}</div>
-      <div v-else-if="statusError" class="muted">{{ t('common.error') }}: {{ statusError.message }}</div>
-
-      <template v-else-if="status?.loggedIn">
-        <div class="kv">
-          <div class="kv-item"><span class="k">{{ t('overview.user') }}</span><span class="v">{{ status.account?.nickname || '-' }}</span></div>
-          <div class="kv-item"><span class="k">{{ t('overview.uid') }}</span><span class="v mono">{{ status.account?.uid || '-' }}</span></div>
-          <div class="kv-item"><span class="k">{{ t('overview.domain') }}</span><span class="v mono">{{ status.auth?.domain || '-' }}</span></div>
-          <div class="kv-item"><span class="k">{{ t('overview.source') }}</span><span class="v">{{ sourceText }}</span></div>
-          <div class="kv-item"><span class="k">{{ t('accounts.title') }}</span><span class="v">{{ status?.accounts?.length || 0 }} 个 · {{ poolModeText }}</span></div>
-          <div class="kv-item"><span class="k">{{ t('overview.tokenExpire') }}</span><span class="v">{{ fmt(status.auth?.expiresAt) }}</span></div>
-        </div>
-        <div class="actions">
-          <router-link class="btn btn-primary" to="/accounts">{{ t('accounts.title') }}</router-link>
-          <button class="btn btn-ghost" :disabled="reimporting" @click="reimport">
-            {{ reimporting ? t('overview.reimporting') : t('overview.reimport') }}
-          </button>
-          <button class="btn btn-danger" :disabled="loggingOut" @click="logout">
-            {{ loggingOut ? t('overview.loggingOut') : t('overview.logout') }}
-          </button>
-        </div>
-      </template>
-
-      <template v-else>
-        <p class="muted">{{ t('overview.notLoggedInHint') }}</p>
-        <div class="actions">
-          <router-link class="btn btn-primary" to="/login">{{ t('overview.login') }}</router-link>
-          <button class="btn btn-ghost" :disabled="reimporting" @click="reimport">
-            {{ reimporting ? t('overview.reimporting') : t('overview.reimport') }}
-          </button>
-        </div>
-      </template>
-      <p v-if="notice" class="hint notice">{{ notice }}</p>
+    <div v-if="status && status.accounts && status.accounts.length === 0" class="empty-banner">
+      <div class="empty-banner-text">
+        <span class="empty-banner-icon">!</span>
+        <span>{{ t('overview.noAccount') }}</span>
+      </div>
+      <router-link class="btn btn-primary btn-sm" to="/accounts">{{ t('overview.goAddAccount') }}</router-link>
     </div>
 
     <div class="stats-row" v-if="stats">
       <StatCard :label="t('overview.logsTotal')" :value="stats.total" tone="primary" />
       <StatCard :label="t('overview.logs24h')" :value="stats.last24h" tone="info" />
       <StatCard :label="t('overview.errors24h')" :value="stats.errors24h || 0" tone="danger" />
+      <StatCard :label="t('usage.totalTokens')" :value="fmtTokens(stats.usage?.totalTokens)" tone="info" />
+      <StatCard :label="t('usage.cachedTokens')" :value="fmtTokens(stats.usage?.cachedTokens)" tone="warning" />
+      <StatCard :label="t('usage.calls24h')" :value="stats.usage?.calls24h || 0" tone="warning" />
+    </div>
+
+    <div class="card chart-card">
+      <div class="head-row">
+        <h2 class="card-title">
+          {{ t('overview.tokenConsumption') }}
+          <span class="sub">{{ t('overview.tokenConsumptionDesc') }}</span>
+        </h2>
+        <div class="dim-toggle">
+          <button class="btn btn-ghost btn-sm" :class="{ active: chartDimension === 'account' }" @click="loadChart('account')">
+            {{ t('overview.chartByAccount') }}
+          </button>
+          <button class="btn btn-ghost btn-sm" :class="{ active: chartDimension === 'apiKey' }" @click="loadChart('apiKey')">
+            {{ t('overview.chartByKey') }}
+          </button>
+        </div>
+      </div>
+      <div v-if="chartLoading" class="muted" style="padding: 24px 0">{{ t('common.loading') }}</div>
+      <TokenChart v-else :days="chartDays" :series="chartSeries" />
     </div>
 
     <div class="grid2">
@@ -177,36 +137,62 @@ const apiRows = computed(() => ([
 </template>
 
 <style scoped>
-.hero { overflow: hidden; }
-.status-dot {
-  width: 10px; height: 10px; border-radius: 50%;
-  background: var(--success); display: inline-block;
-  box-shadow: 0 0 0 3px var(--success-soft);
+.empty-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  margin-top: 16px;
+  border: 1px solid var(--warning);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
 }
-.status-dot.off { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
-.kv {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 12px 20px;
-  margin: 16px 0;
+.empty-banner-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
 }
-.kv-item .k { display: block; font-size: 12px; color: var(--text-2); margin-bottom: 2px; }
-.kv-item .v { font-size: 13px; font-weight: 600; word-break: break-all; }
-.actions { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+.empty-banner-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--warning);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 13px;
+  flex: none;
+}
 .stats-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 16px;
   margin-top: 16px;
 }
+.chart-card { margin-top: 16px; }
+.head-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+.dim-toggle { display: flex; gap: 6px; }
+.dim-toggle .btn.active { background: var(--primary-soft); color: var(--primary-text); border-color: var(--primary); }
+.btn-sm { padding: 5px 11px; font-size: 12px; }
 .grid2 {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
   margin-top: 16px;
+  align-items: stretch;
+}
+.grid2 .card {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
 }
 .field-label { font-size: 12px; color: var(--text-2); margin-top: 8px; }
-.notice { margin-top: 12px; }
 .table-wrap { overflow-x: auto; }
 @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
 </style>

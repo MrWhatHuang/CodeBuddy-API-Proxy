@@ -44,7 +44,9 @@ CODEBUDDY_NO_OPEN=1 npm start
 
 | 路径 | 页面 |
 |---|---|
-| `/home` | 总览：登录状态、代理地址、curl 示例、接口一览 |
+| `/home` | 总览：登录状态、代理地址、curl 示例、接口一览、Token 消耗趋势图（可按 OAuth 账号 / API 密钥维度切换） |
+| `/apikeys` | API 密钥：新增 / 删除 / 重新生成多个密钥、校验开关 |
+| `/usage` | 使用记录：请求与 token 用量明细、按账号 / 密钥 / 模型筛选、CSV 导出 |
 | `/models` | 模型列表（浏览器访问为页面；`Accept: application/json` 时仍返回模型 JSON） |
 | `/logs` | 日志：级别 / 分类 / 关键字、详情展开、自动刷新、清空 |
 | `/settings` | 系统配置 |
@@ -67,7 +69,7 @@ CODEBUDDY_NO_OPEN=1 npm start
 | 文件 | 说明 |
 |---|---|
 | `session.json` | OAuth / VSCode 登录态（权限 `0600`），含 `accessToken`、`refreshToken`、账号。也可用 `CODEBUDDY_SESSION_FILE` 单独指定 |
-| `proxy.db` | SQLite：`logs` 表 + `config` 表 + `models` 表（自定义模型）。也可用 `CODEBUDDY_DB_FILE` 单独指定 |
+| `proxy.db` | SQLite：`logs` 表 + `config` 表 + `models` 表（自定义模型）+ `api_keys` 表 + `usage` 表（用量统计）。也可用 `CODEBUDDY_DB_FILE` 单独指定 |
 
 启动读登录态的优先级：
 
@@ -149,7 +151,7 @@ codex exec "你的任务"
 | `CODEBUDDY_DB_FILE` | `~/.codebuddy-proxy/proxy.db` | SQLite 数据库 |
 | `CODEBUDDY_FORCE_MODEL` | 空 | 强制替换请求 model |
 | `CODEBUDDY_DEFAULT_MODEL` | `default` | 缺省 model |
-| `CODEBUDDY_API_KEY` | 空 | 客户端访问 `/v1` 与 `/responses` 所需的 API 密钥；空则不校验。也可在管理页「系统配置」里设置 |
+| `CODEBUDDY_API_KEY` | 空 | 兼容旧版：指定单个 API 密钥（首次启动时迁移进 API 密钥表）。也可在管理页「API 密钥」里管理多个密钥 |
 | `CODEBUDDY_NO_OPEN` | 空 | 设置则不自动打开管理页 |
 | `CODEBUDDY_DEBUG` | 空 | 把最近一次 Responses 请求 dump 到 `/tmp/codebuddy-debug-last.json` |
 
@@ -172,13 +174,11 @@ curl -X PUT http://127.0.0.1:3800/api/config \
   }'
 ```
 
-设置 / 清除 API 密钥（设置后客户端访问 `/v1` 与 `/responses` 必须携带）：
+设置 / 清除 API 密钥：建议在管理页「API 密钥」页面新增、删除或重新生成多个密钥。也兼容旧版的单密钥设置方式（写入密钥表）：
 
 ```bash
-# 设置密钥
+# 设置密钥（作为新密钥加入，非覆盖）
 curl -X PUT http://127.0.0.1:3800/api/config -H "Content-Type: application/json" -d '{"apiKey": "my-secret-key"}'
-# 清除（关闭校验）
-curl -X PUT http://127.0.0.1:3800/api/config -H "Content-Type: application/json" -d '{"apiKey": ""}'
 ```
 
 | 字段 | 默认 | 说明 |
@@ -193,7 +193,8 @@ curl -X PUT http://127.0.0.1:3800/api/config -H "Content-Type: application/json"
 | `forceModel` | 空 | 非空则覆盖所有请求的 `model` |
 | `requestTimeoutMs` | `300000` | 上游超时（1s–30min） |
 | `corsOrigin` | `*` | `Access-Control-Allow-Origin` |
-| `apiKey` | 空 | 客户端访问 `/v1` 与 `/responses` 所需的 API 密钥；空 = 不校验 |
+| `apiKeyEnabled` | `true` | 是否校验客户端访问 `/v1` 与 `/responses` 所需的 API 密钥 |
+| `apiKey` | 空 | 兼容旧版：加入一个密钥到密钥表；不影响校验开关 |
 
 日志查询：
 
@@ -229,6 +230,18 @@ curl "http://127.0.0.1:3800/api/logs?level=info&category=proxy&q=chat&limit=50&o
 | POST | `/v1/chat/completions` `/v2/chat/completions` | 对话 |
 | POST | `/v1/completions` `/v2/completions` | 补全 |
 | POST | `/v1/embeddings` `/v2/embeddings` | 向量 |
+| GET | `/api/keys` | API 密钥列表（打码） + 校验开关状态 |
+| POST | `/api/keys` | 新增 API 密钥（可自动生成或手填） |
+| POST | `/api/keys/regenerate/:id` | 重新生成密钥（旧密钥立即失效） |
+| DELETE | `/api/keys/:id` | 删除 API 密钥 |
+| GET | `/api/usage` | 用量记录：按时间 / 账号 / 密钥 / 模型筛选、分页，含 token 汇总 |
+| GET | `/api/usage/stats?dimension=account\|apiKey` | 按天聚合的 token 用量，供首页图表 |
+
+## 用量统计
+
+每次 `/v1/chat/completions`、`/v1/completions`、`/v1/embeddings`、`/v1/responses` 请求都会写入 SQLite `usage` 表，记录：时间、接口、模型、所用 OAuth 账号、所用 API 密钥（未走密钥则归到「空密钥」维度）、输入/输出/总 token、**缓存命中 token**（`prompt_cache_hit_tokens` / `cached_tokens`）及**缓存命中率**（`cacheHitRate`，= 命中 token / 输入 token，仅后端按需计算、不入库）、耗时与状态。流式请求也会在结束时解析 `usage` 块以采集 token。旧库会自动补充 `cached_tokens` 列。
+
+管理页「总览」的 Token 消耗趋势图可按 **OAuth 账号** 或 **API 密钥** 维度查看近 14 天用量，柱体中浅色部分即缓存命中 token，并可看到「缓存命中」图例；「使用记录」页提供明细（含缓存命中列与每行命中率、汇总统计卡片含缓存命中率）、筛选与 CSV 导出（含 `cache_hit_rate` 列）。
 
 ## 认证机制（逆向）
 
