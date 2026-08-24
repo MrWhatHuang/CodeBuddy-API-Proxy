@@ -341,4 +341,8 @@ export default {
   footer: {
     powered: 'CodeBuddy API Proxy',
   },
+  build: {
+    warnText: 'Frontend source changed, but the admin page has not been rebuilt. Build and restart the server:',
+    recheck: 'Re-check',
+  },
 };

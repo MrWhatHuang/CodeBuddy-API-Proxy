@@ -184,13 +184,16 @@ const apiRows = computed(() => ([
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
-  margin-top: 16px;
+  margin: 16px 0;
   align-items: stretch;
 }
 .grid2 .card {
   display: flex;
   flex-direction: column;
   height: 100%;
+}
+.grid2 .card + .card {
+  margin-top: 0;
 }
 .field-label { font-size: 12px; color: var(--text-2); margin-top: 8px; }
 .table-wrap { overflow-x: auto; }

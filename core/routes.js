@@ -10,6 +10,7 @@ const config = require('./config');
 const store = require('./store');
 const logger = require('./logger');
 const util = require('./util');
+const buildState = require('./build');
 const models = require('./models');
 const sessionMod = require('./session');
 const vscode = require('./vscode');
@@ -79,6 +80,7 @@ function configResponse() {
       sessionFile: config.SESSION_FILE,
       dbFile: config.DB_FILE,
       dataDir: config.DATA_DIR,
+      build: buildState.getBuildState(),
     },
     options: {
       levels: config.LOG_LEVELS,
@@ -91,11 +93,15 @@ function configResponse() {
 /* ============================ 静态 / SPA ============================ */
 
 function distMissingHtml() {
+  const b = buildState.getBuildState();
+  const title = b.built ? '管理页面已过期' : '管理页面尚未构建';
+  const body = b.built
+    ? '检测到前端源码更新，但尚未重新构建。<br>请先运行:  <b>npm install && npm run build</b><br>然后重启服务。'
+    : '请先运行:  <b>npm install && npm run build</b><br>然后重启服务。';
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>CodeBuddy API Proxy</title>
 <style>body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#0f1115;color:#e6e8eb;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}pre{background:#1b1f24;padding:20px 24px;border-radius:10px;line-height:1.7;border:1px solid #2a2f36}</style>
-</head><body><pre>管理页面尚未构建。
-请先运行:  <b>npm install && npm run build</b>
-然后重启服务。</pre></body></html>`;
+</head><body><pre>${title}。
+${body}</pre></body></html>`;
 }
 
 function serveIndex(res) {

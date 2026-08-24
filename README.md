@@ -38,7 +38,7 @@ CODEBUDDY_NO_OPEN=1 npm start
 
 也可在管理页「系统配置」里关闭「启动后自动打开管理页」。`CODEBUDDY_NO_OPEN` 优先级更高。
 
-未执行 `npm run build` 时，打开管理页会提示先构建。
+未执行 `npm run build` 时，打开管理页会提示先构建。若拉取了最新代码但未重新构建管理页，服务端会比对 `web/` 源码与 `dist/` 产物的时间戳，并在管理页顶部提示重新构建（`npm install && npm run build` 后重启）。
 
 ## 管理页
 

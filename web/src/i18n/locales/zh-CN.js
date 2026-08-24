@@ -341,4 +341,8 @@ export default {
   footer: {
     powered: 'CodeBuddy API Proxy',
   },
+  build: {
+    warnText: '前端源码已更新，但管理页尚未重新构建。请构建后重启服务：',
+    recheck: '重新检测',
+  },
 };
