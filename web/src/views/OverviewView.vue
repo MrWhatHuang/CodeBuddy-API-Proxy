@@ -63,6 +63,11 @@ const sourceText = computed(() => {
   return t('common.unknown');
 });
 
+const poolModeText = computed(() => {
+  const m = status.value?.pool?.mode;
+  return m === 'pinned' ? t('accounts.modePinned') : t('accounts.modePool');
+});
+
 function fmt(ms) {
   if (!ms) return '-';
   return new Date(ms).toLocaleString();
@@ -100,9 +105,11 @@ const apiRows = computed(() => ([
           <div class="kv-item"><span class="k">{{ t('overview.uid') }}</span><span class="v mono">{{ status.account?.uid || '-' }}</span></div>
           <div class="kv-item"><span class="k">{{ t('overview.domain') }}</span><span class="v mono">{{ status.auth?.domain || '-' }}</span></div>
           <div class="kv-item"><span class="k">{{ t('overview.source') }}</span><span class="v">{{ sourceText }}</span></div>
+          <div class="kv-item"><span class="k">{{ t('accounts.title') }}</span><span class="v">{{ status?.accounts?.length || 0 }} 个 · {{ poolModeText }}</span></div>
           <div class="kv-item"><span class="k">{{ t('overview.tokenExpire') }}</span><span class="v">{{ fmt(status.auth?.expiresAt) }}</span></div>
         </div>
         <div class="actions">
+          <router-link class="btn btn-primary" to="/accounts">{{ t('accounts.title') }}</router-link>
           <button class="btn btn-ghost" :disabled="reimporting" @click="reimport">
             {{ reimporting ? t('overview.reimporting') : t('overview.reimport') }}
           </button>

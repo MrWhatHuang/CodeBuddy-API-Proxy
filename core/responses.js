@@ -394,15 +394,16 @@ async function handleResponses(req, res) {
     } catch { /* ignore */ }
   }
 
-  let sess;
-  try { sess = await auth.getValidSession(); }
+  const accountKey = auth.extractAccountKey(req, payload);
+  let acct;
+  try { acct = await auth.pickAccountForRequest(accountKey); }
   catch (e) {
     logger.log('warn', 'responses', `拒绝: ${e.message}`);
     util.sendJson(res, 401, { error: { message: e.message, type: 'authentication_error' } });
     return;
   }
 
-  const headers = { ...auth.buildAuthHeaders(sess), 'Content-Type': 'application/json', 'Accept': 'text/event-stream' };
+  const headers = { ...auth.buildAuthHeaders(acct), 'Content-Type': 'application/json', 'Accept': 'text/event-stream' };
   const targetUrl = `${config.ENDPOINT}/v2/chat/completions`;
   const jsonBody = JSON.stringify(chatPayload);
   const startedAt = Date.now();

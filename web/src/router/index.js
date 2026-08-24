@@ -4,6 +4,7 @@ const routes = [
   { path: '/', redirect: '/home' },
   { path: '/home', name: 'overview', component: () => import('@/views/OverviewView.vue'), meta: { title: 'overview' } },
   { path: '/models', name: 'models', component: () => import('@/views/ModelsView.vue'), meta: { title: 'models' } },
+  { path: '/accounts', name: 'accounts', component: () => import('@/views/AccountsView.vue'), meta: { title: 'accounts' } },
   { path: '/logs', name: 'logs', component: () => import('@/views/LogsView.vue'), meta: { title: 'logs' } },
   { path: '/settings', name: 'settings', component: () => import('@/views/SettingsView.vue'), meta: { title: 'settings' } },
   { path: '/login', name: 'login', component: () => import('@/views/LoginView.vue'), meta: { title: 'login' } },

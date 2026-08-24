@@ -19,23 +19,47 @@ const responses = require('./responses');
 
 /* ============================ 状态对象 ============================ */
 
+function accountPublic(acct) {
+  if (!acct) return null;
+  const a = acct.account || {};
+  const au = acct.auth || {};
+  return {
+    id: acct.id,
+    name: acct.name || '',
+    source: acct.source || 'file',
+    uid: a.uid || '',
+    nickname: a.nickname || '',
+    type: a.type || 'personal',
+    enterpriseId: a.enterpriseId || '',
+    domain: au.domain || config.ENDPOINT_HOST,
+    expiresAt: au.expiresAt || 0,
+    expiresInSeconds: au.expiresAt ? Math.round((au.expiresAt - Date.now()) / 1000) : 0,
+    hasToken: !!au.accessToken,
+    lastUsedAt: acct.lastUsedAt || 0,
+    useCount: acct.useCount || 0,
+    createdAt: acct.createdAt || 0,
+  };
+}
+
 function statusObject() {
-  const session = sessionMod.getSession();
-  const a = session ? session.account : null;
-  const au = session ? session.auth : null;
+  const pool = sessionMod.getPoolConfig();
+  const active = sessionMod.getActiveAccount();
+  const a = active ? active.account : null;
   return {
     loggedIn: sessionMod.isLoggedIn(),
     source: sessionMod.getSessionSource(),
     endpoint: config.ENDPOINT,
     baseUrl: `http://${config.HOST}:${config.PORT}`,
     openaiBaseUrl: `http://${config.HOST}:${config.PORT}/v1`,
+    pool: Object.assign({}, pool),
+    accounts: sessionMod.listAccounts().map(accountPublic),
     account: a ? { uid: a.uid, nickname: a.nickname, type: a.type, enterpriseId: a.enterpriseId || '' } : null,
-    auth: au ? {
-      accessToken: util.maskedToken(au.accessToken),
-      refreshToken: util.maskedToken(au.refreshToken),
-      domain: au.domain || config.ENDPOINT_HOST,
-      expiresAt: au.expiresAt || 0,
-      expiresInSeconds: au.expiresAt ? Math.round((au.expiresAt - Date.now()) / 1000) : 0,
+    auth: active ? {
+      accessToken: util.maskedToken(active.auth.accessToken),
+      refreshToken: util.maskedToken(active.auth.refreshToken),
+      domain: active.auth.domain || config.ENDPOINT_HOST,
+      expiresAt: active.auth.expiresAt || 0,
+      expiresInSeconds: active.auth.expiresAt ? Math.round((active.auth.expiresAt - Date.now()) / 1000) : 0,
     } : null,
     models: models.allModels(store.listModels()),
   };
@@ -169,10 +193,18 @@ async function route(req, res) {
   if (pathname === '/api/import-vscode') {
     const r = vscode.readVscodeSession();
     if (r && r.session) {
-      sessionMod.setSession(r.session, 'vscode');
-      sessionMod.saveSession();
+      const acct = sessionMod.addAccount({
+        name: '',
+        source: 'vscode',
+        account: r.session.account,
+        auth: r.session.auth,
+        accounts: r.session.accounts || [],
+        lastUsedAt: 0,
+        useCount: 0,
+        createdAt: Date.now(),
+      });
       logger.log('info', 'auth', `已从 VSCode (${r.source}) 导入登录态，策略: ${r.strategy}`);
-      util.sendJson(res, 200, { ok: true, source: r.source, strategy: r.strategy, account: sessionMod.getSession().account });
+      util.sendJson(res, 200, { ok: true, source: r.source, strategy: r.strategy, account: acct ? acct.account : null });
     } else {
       util.sendJson(res, 200, { ok: false, error: '未能在 VSCode 中找到有效的 CodeBuddy 登录态' });
     }
@@ -190,8 +222,9 @@ async function route(req, res) {
   if (pathname === '/login/state' && method === 'GET') {
     try {
       const data = await auth.fetchAuthState();
-      auth.pendingLogins.set(data.state, { status: 'pending', startedAt: Date.now() });
-      auth.completeLogin(data.state);
+      const name = u.searchParams.get('name') || '';
+      auth.pendingLogins.set(data.state, { status: 'pending', startedAt: Date.now(), name });
+      auth.completeLogin(data.state, name);
       util.sendJson(res, 200, { state: data.state, authUrl: data.authUrl });
     } catch (e) { util.sendJson(res, 502, { error: e.message }); }
     return;
@@ -202,7 +235,7 @@ async function route(req, res) {
     if (!state) { util.sendJson(res, 400, { error: '缺少 state 参数' }); return; }
     const entry = auth.pendingLogins.get(state);
     if (!entry) { util.sendJson(res, 404, { error: '未知 state' }); return; }
-    if (entry.status === 'success') { util.sendJson(res, 200, { status: 'success', account: entry.account }); auth.pendingLogins.delete(state); return; }
+    if (entry.status === 'success') { util.sendJson(res, 200, { status: 'success', accountId: entry.accountId, account: entry.account }); auth.pendingLogins.delete(state); return; }
     if (entry.status === 'error') { util.sendJson(res, 200, { status: 'error', error: entry.error }); auth.pendingLogins.delete(state); return; }
     if (Date.now() - entry.startedAt > config.LOGIN_TIMEOUT_MS) { entry.status = 'timeout'; util.sendJson(res, 200, { status: 'timeout', error: '登录超时' }); auth.pendingLogins.delete(state); return; }
     util.sendJson(res, 200, { status: 'pending' });
@@ -221,6 +254,85 @@ async function route(req, res) {
     logger.log('info', 'auth', '已退出登录');
     res.writeHead(302, { Location: '/home' });
     res.end();
+    return;
+  }
+
+  /* ---- 账号池管理 ---- */
+  if (pathname === '/api/accounts' && method === 'GET') {
+    const pool = sessionMod.getPoolConfig();
+    const accounts = sessionMod.listAccounts().map(accountPublic);
+    util.sendJson(res, 200, { pool, accounts });
+    return;
+  }
+
+  if (pathname === '/api/accounts/login' && method === 'POST') {
+    try {
+      const buf = await util.readBody(req);
+      const body = buf.length ? JSON.parse(buf.toString('utf8')) : {};
+      const name = (body && typeof body.name === 'string') ? body.name.trim() : '';
+      const data = await auth.fetchAuthState();
+      auth.pendingLogins.set(data.state, { status: 'pending', startedAt: Date.now(), name });
+      auth.completeLogin(data.state, name);
+      util.sendJson(res, 200, { state: data.state, authUrl: data.authUrl, name });
+    } catch (e) { util.sendJson(res, 502, { error: e.message }); }
+    return;
+  }
+
+  if (pathname === '/api/accounts/login/status' && method === 'GET') {
+    const state = u.searchParams.get('state');
+    if (!state) { util.sendJson(res, 400, { error: '缺少 state 参数' }); return; }
+    const entry = auth.pendingLogins.get(state);
+    if (!entry) { util.sendJson(res, 404, { error: '未知 state' }); return; }
+    if (entry.status === 'success') { util.sendJson(res, 200, { status: 'success', accountId: entry.accountId, account: entry.account }); auth.pendingLogins.delete(state); return; }
+    if (entry.status === 'error') { util.sendJson(res, 200, { status: 'error', error: entry.error }); auth.pendingLogins.delete(state); return; }
+    if (Date.now() - entry.startedAt > config.LOGIN_TIMEOUT_MS) { entry.status = 'timeout'; util.sendJson(res, 200, { status: 'timeout', error: '登录超时' }); auth.pendingLogins.delete(state); return; }
+    util.sendJson(res, 200, { status: 'pending' });
+    return;
+  }
+
+  if (pathname === '/api/pool' && method === 'GET') {
+    util.sendJson(res, 200, sessionMod.getPoolConfig());
+    return;
+  }
+  if (pathname === '/api/pool' && method === 'PUT') {
+    try {
+      const buf = await util.readBody(req);
+      const body = buf.length ? JSON.parse(buf.toString('utf8')) : {};
+      const patch = {};
+      if (body.mode === 'pool' || body.mode === 'pinned') patch.mode = body.mode;
+      if (typeof body.strategy === 'string' && body.strategy) patch.strategy = body.strategy;
+      if (body.pinnedId !== undefined) patch.pinnedId = body.pinnedId || null;
+      const pool = sessionMod.setPoolConfig(patch);
+      logger.log('info', 'config', '账号池配置已更新', pool);
+      util.sendJson(res, 200, pool);
+    } catch (e) {
+      util.sendJson(res, 400, { error: { message: '更新失败: ' + e.message } });
+    }
+    return;
+  }
+
+  if (pathname.startsWith('/api/accounts/') && method === 'PUT' && !pathname.includes('/login')) {
+    const id = decodeURIComponent(pathname.slice('/api/accounts/'.length));
+    try {
+      const buf = await util.readBody(req);
+      const body = buf.length ? JSON.parse(buf.toString('utf8')) : {};
+      if (typeof body.name !== 'string' || !body.name.trim()) { util.sendJson(res, 400, { error: { message: 'name 不能为空' } }); return; }
+      const acct = sessionMod.updateAccount(id, { name: body.name });
+      if (!acct) { util.sendJson(res, 404, { error: { message: '未找到该账号' } }); return; }
+      logger.log('info', 'config', '账号已重命名: ' + acct.name);
+      util.sendJson(res, 200, accountPublic(acct));
+    } catch (e) {
+      util.sendJson(res, 400, { error: { message: '重命名失败: ' + e.message } });
+    }
+    return;
+  }
+
+  if (pathname.startsWith('/api/accounts/') && method === 'DELETE' && !pathname.includes('/login')) {
+    const id = decodeURIComponent(pathname.slice('/api/accounts/'.length));
+    const removed = sessionMod.removeAccount(id);
+    if (!removed) { util.sendJson(res, 404, { error: { message: '未找到该账号' } }); return; }
+    logger.log('info', 'auth', '账号已删除: ' + id);
+    util.sendJson(res, 200, { ok: true, id });
     return;
   }
 

@@ -50,8 +50,13 @@ function start() {
     console.log(`  OpenAI 基址: http://${config.HOST}:${config.PORT}/v1`);
     console.log(`  后端:       ${config.ENDPOINT}`);
     if (sessionMod.isLoggedIn()) {
+      const accounts = sessionMod.listAccounts();
+      const pool = sessionMod.getPoolConfig();
+      const active = sessionMod.getActiveAccount();
       const sourceText = sessionMod.getSessionSource() === 'vscode' ? 'VSCode 插件' : sessionMod.getSessionSource() === 'oauth' ? '网页登录' : '本地缓存';
-      console.log(`  登录状态:   已登录 (${session.account.nickname || session.account.uid}, 来源: ${sourceText})`);
+      console.log(`  账号池:     ${accounts.length} 个账号, 模式: ${pool.mode === 'pinned' ? '指定账号' : '池模式'}`);
+      for (const a of accounts) console.log(`    - ${a.name || a.account.nickname || a.account.uid}${pool.pinnedId === a.id ? ' (当前指定)' : ''}`);
+      console.log(`  活跃账号:   ${active ? (active.name || active.account.nickname || active.account.uid) : '-'} (来源: ${sourceText})`);
       if (vs && vs.strategy) console.log(`  解密策略:   ${vs.strategy}`);
     } else {
       console.log(`  登录状态:   未登录（请打开管理页登录）`);

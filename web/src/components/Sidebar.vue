@@ -7,6 +7,7 @@ const { t } = useI18n();
 const items = [
   { name: 'overview', icon: 'overview', labelKey: 'overview', to: '/home' },
   { name: 'models', icon: 'models', labelKey: 'models', to: '/models' },
+  { name: 'accounts', icon: 'accounts', labelKey: 'accounts', to: '/accounts' },
   { name: 'logs', icon: 'logs', labelKey: 'logs', to: '/logs' },
   { name: 'settings', icon: 'settings', labelKey: 'settings', to: '/settings' },
 ];

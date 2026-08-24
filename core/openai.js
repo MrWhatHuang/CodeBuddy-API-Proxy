@@ -97,8 +97,9 @@ async function handleProxy(req, res, pathname) {
   if (needAggregate) payload.stream = true;
   const jsonBody = JSON.stringify(payload);
 
-  let sess;
-  try { sess = await auth.getValidSession(); }
+  const accountKey = auth.extractAccountKey(req, payload);
+  let acct;
+  try { acct = await auth.pickAccountForRequest(accountKey); }
   catch (e) {
     logger.log('warn', 'proxy', `${pathname} 拒绝: ${e.message}`, { pathname, model: payload.model });
     util.sendJson(res, 401, { error: { message: e.message, type: 'authentication_error' } });
@@ -106,7 +107,7 @@ async function handleProxy(req, res, pathname) {
   }
 
   const headers = {
-    ...auth.buildAuthHeaders(sess),
+    ...auth.buildAuthHeaders(acct),
     'Content-Type': 'application/json',
     'Accept': (isStream || needAggregate) ? 'text/event-stream' : 'application/json',
   };
