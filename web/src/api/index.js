@@ -40,4 +40,7 @@ export const api = {
   logout: () => alova.Post('/api/logout'),
   loginState: () => alova.Get('/login/state'),
   loginStatus: (state) => alova.Get(`/login/status?state=${encodeURIComponent(state)}`),
+  listModels: () => alova.Get('/api/models'),
+  addModel: (model) => alova.Post('/api/models', model),
+  deleteModel: (id) => alova.Delete(`/api/models/${encodeURIComponent(id)}`),
 };

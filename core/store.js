@@ -44,7 +44,19 @@ function getDb() {
       key   TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
-  `);
+
+    CREATE TABLE IF NOT EXISTS models (
+      id               TEXT PRIMARY KEY,
+      name             TEXT NOT NULL,
+      max_input_tokens  INTEGER NOT NULL DEFAULT 0,
+      max_output_tokens INTEGER NOT NULL DEFAULT 0,
+      tools            INTEGER NOT NULL DEFAULT 0,
+      vision           INTEGER NOT NULL DEFAULT 0,
+      reasoning        INTEGER NOT NULL DEFAULT 0,
+      region           TEXT NOT NULL DEFAULT 'cn',
+      created_at       INTEGER NOT NULL
+    );
+    `);
   return db;
 }
 
@@ -221,7 +233,84 @@ function stats() {
   return { total, last24h, errors24h, byLevel, byCategory };
 }
 
+
+/* ============================ 自定义模型 ============================ */
+
+function validateModelInput(body) {
+  if (!body || typeof body !== 'object') return { error: 'invalid body' };
+  const id = typeof body.id === 'string' ? body.id.trim() : '';
+  const name = typeof body.name === 'string' ? body.name.trim() : '';
+  if (!id) return { error: 'model id 不能为空' };
+  if (!/^[A-Za-z0-9._:-]+$/.test(id)) return { error: 'model id 仅允许字母、数字及 . _ : - 字符' };
+  if (!name) return { error: 'model name 不能为空' };
+  const num = (v) => { const n = parseInt(v, 10); return Number.isFinite(n) && n >= 0 ? n : 0; };
+  const bool = (v) => v === true || v === 'true' || v === 1 || v === '1';
+  return {
+    model: {
+      id,
+      name,
+      maxInputTokens: num(body.maxInputTokens),
+      maxOutputTokens: num(body.maxOutputTokens),
+      tools: bool(body.tools),
+      vision: bool(body.vision),
+      reasoning: bool(body.reasoning),
+      region: body.region === 'intl' ? 'intl' : 'cn',
+      createdAt: Date.now(),
+    },
+  };
+}
+
+function addModel(body) {
+  const { error, model } = validateModelInput(body);
+  if (error) return { error };
+  const d = getDb();
+  d.prepare(
+    'INSERT INTO models(id, name, max_input_tokens, max_output_tokens, tools, vision, reasoning, region, created_at) ' +
+    'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+    'ON CONFLICT(id) DO UPDATE SET name=excluded.name, max_input_tokens=excluded.max_input_tokens, ' +
+    'max_output_tokens=excluded.max_output_tokens, tools=excluded.tools, vision=excluded.vision, ' +
+    'reasoning=excluded.reasoning, region=excluded.region'
+  ).run(model.id, model.name, model.maxInputTokens, model.maxOutputTokens,
+        model.tools ? 1 : 0, model.vision ? 1 : 0, model.reasoning ? 1 : 0, model.region, model.createdAt);
+  return { model };
+}
+
+function listModels() {
+  const rows = getDb().prepare('SELECT * FROM models ORDER BY created_at ASC, id ASC').all();
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    maxInputTokens: r.max_input_tokens,
+    maxOutputTokens: r.max_output_tokens,
+    tools: !!r.tools,
+    vision: !!r.vision,
+    reasoning: !!r.reasoning,
+    region: r.region,
+    createdAt: r.created_at,
+  }));
+}
+
+function removeModel(id) {
+  if (!id) return { error: 'model id 不能为空' };
+  const d = getDb();
+  const r = d.prepare('DELETE FROM models WHERE id = ?').run(id);
+  return { deleted: r.changes > 0 };
+}
+
+function getModel(id) {
+  const r = getDb().prepare('SELECT * FROM models WHERE id = ?').get(id);
+  if (!r) return null;
+  return {
+    id: r.id, name: r.name,
+    maxInputTokens: r.max_input_tokens, maxOutputTokens: r.max_output_tokens,
+    tools: !!r.tools, vision: !!r.vision, reasoning: !!r.reasoning, region: r.region,
+  };
+}
+
 module.exports = {
+  // 自定义模型
+  addModel, listModels, removeModel, getModel,
+
   getConfig, setConfig, publicValues, applyPublicPatch,
   getRequestTimeoutMs, getCorsOrigin, loggingDetailsEnabled,
   addLog, queryLogs, clearLogs, stats,

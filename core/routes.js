@@ -37,7 +37,7 @@ function statusObject() {
       expiresAt: au.expiresAt || 0,
       expiresInSeconds: au.expiresAt ? Math.round((au.expiresAt - Date.now()) / 1000) : 0,
     } : null,
-    models: models.MODEL_CATALOG,
+    models: models.allModels(store.listModels()),
   };
 }
 
@@ -59,7 +59,7 @@ function configResponse() {
     options: {
       levels: config.LOG_LEVELS,
       categories: config.LOG_CATEGORIES,
-      models: models.MODEL_CATALOG.map((m) => ({ id: m.id, name: m.name })),
+      models: models.allModels(store.listModels()).map((m) => ({ id: m.id, name: m.name })),
     },
   };
 }
@@ -224,12 +224,40 @@ async function route(req, res) {
     return;
   }
 
-  /* ---- 模型列表 ---- */
-  if (pathname === '/v1/models') { util.sendJson(res, 200, models.modelsResponse()); return; }
+  /* ---- 模型列表（内置 + 自定义合并） ---- */
+  if (pathname === '/v1/models') { util.sendJson(res, 200, models.modelsResponse(store.listModels())); return; }
   if (pathname === '/models' && method === 'GET') {
     const accept = String(req.headers.accept || '');
     if (accept.includes('text/html')) { serveIndex(res); return; }
-    util.sendJson(res, 200, models.modelsResponse());
+    util.sendJson(res, 200, models.modelsResponse(store.listModels()));
+    return;
+  }
+
+  /* ---- 自定义模型管理 API ---- */
+  if (pathname === '/api/models' && method === 'GET') {
+    util.sendJson(res, 200, { models: models.allModels(store.listModels()) });
+    return;
+  }
+  if (pathname === '/api/models' && method === 'POST') {
+    try {
+      const buf = await util.readBody(req);
+      const body = buf.length ? JSON.parse(buf.toString('utf8')) : {};
+      const r = store.addModel(body);
+      if (r.error) { util.sendJson(res, 400, { error: { message: r.error } }); return; }
+      logger.log('info', 'config', `新增自定义模型: ${r.model.id}`, r.model);
+      util.sendJson(res, 200, { model: r.model });
+    } catch (e) {
+      util.sendJson(res, 400, { error: { message: `新增模型失败: ${e.message}` } });
+    }
+    return;
+  }
+  if (pathname.startsWith('/api/models/') && method === 'DELETE') {
+    const id = decodeURIComponent(pathname.slice('/api/models/'.length));
+    const r = store.removeModel(id);
+    if (r.error) { util.sendJson(res, 400, { error: { message: r.error } }); return; }
+    if (!r.deleted) { util.sendJson(res, 404, { error: { message: '未找到该模型' } }); return; }
+    logger.log('info', 'config', `删除自定义模型: ${id}`);
+    util.sendJson(res, 200, { ok: true, id });
     return;
   }
 
