@@ -16,7 +16,7 @@ const keys = computed(() => keysData.value?.keys || []);
 const models = computed(() => status.value?.models || []);
 
 const filters = reactive({
-  range: '7d',
+  range: 'today',
   accountId: '',
   apiKeyId: '',
   model: '',
@@ -52,15 +52,6 @@ const { data: usageTotals, send: reloadTotals } = useRequest((p) => api.usageSta
   immediate: false,
 });
 
-// 顶部统计的默认时间范围（今天），用 tab 切换
-const statsRange = ref('today');
-const statsTabs = [
-  { value: 'today', labelKey: 'usage.rangeToday' },
-  { value: '7d', labelKey: 'usage.range7d' },
-  { value: '14d', labelKey: 'usage.range14d' },
-  { value: '30d', labelKey: 'usage.range30d' },
-  { value: 'all', labelKey: 'usage.rangeAll' },
-].map((s) => ({ ...s, label: t(s.labelKey) }));
 const { data: statsData, loading: statsLoading, send: reloadStats } = useRequest(
   (p) => api.usage({ from: p.from, limit: 1, offset: 0 }),
   { immediate: false }
@@ -70,7 +61,7 @@ const pageSize = 50;
 const offset = ref(0);
 
 async function loadStats() {
-  await reloadStats({ from: rangeToFrom(statsRange.value) });
+  await reloadStats({ from: rangeToFrom(filters.range) });
 }
 
 async function loadList(reset = true) {
@@ -89,8 +80,7 @@ async function load(reset = true) {
   return usage.value;
 }
 
-watch(filters, () => { loadList(true); }, { deep: true, immediate: true });
-watch(statsRange, () => { loadStats(); }, { immediate: true });
+watch(filters, () => { loadList(true); loadStats(); }, { deep: true, immediate: true });
 
 const items = computed(() => usage.value?.items || []);
 
@@ -154,19 +144,6 @@ function exportCsv() {
 
 <template>
   <div>
-    <div class="card">
-      <h2 class="card-title">{{ t('usage.title') }}</h2>
-      <p class="hint" style="margin-top: -8px">{{ t('usage.desc') }}</p>
-    </div>
-
-    <div class="stats-header">
-      <div class="seg" role="tablist">
-        <button v-for="r in statsTabs" :key="r.value" class="seg-item"
-          :class="{ active: statsRange === r.value }"
-          @click="statsRange = r.value">{{ r.label }}</button>
-      </div>
-    </div>
-
     <div class="stats-row" v-if="statsData">
       <StatCard :label="t('usage.totalCalls')" :value="statsData.calls" tone="primary" />
       <StatCard :label="t('usage.totalTokens')" :value="fmtTokens(statsData.totalTokens)" tone="info" />
@@ -268,37 +245,6 @@ function exportCsv() {
 </template>
 
 <style scoped>
-.stats-header {
-  display: flex;
-  align-items: center;
-  margin: 16px 0 12px;
-}
-.seg {
-  display: inline-flex;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 3px;
-  gap: 2px;
-}
-.seg-item {
-  border: none;
-  background: transparent;
-  color: var(--text-2);
-  font-size: 12px;
-  font-weight: 500;
-  padding: 5px 14px;
-  border-radius: calc(var(--radius) - 2px);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.seg-item:hover { color: var(--text); }
-.seg-item.active {
-  background: var(--surface);
-  color: var(--primary);
-  box-shadow: var(--shadow-sm);
-  font-weight: 600;
-}
 .stats-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
