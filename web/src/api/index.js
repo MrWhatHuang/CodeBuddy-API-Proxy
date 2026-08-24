@@ -42,6 +42,7 @@ export const api = {
   loginStatus: (state) => alova.Get(`/login/status?state=${encodeURIComponent(state)}`),
   listAccounts: () => alova.Get('/api/accounts'),
   accountLogin: (name) => alova.Post('/api/accounts/login', { name }),
+  importAccount: (payload) => alova.Post('/api/accounts/import', payload),
   accountLoginStatus: (state) => alova.Get(`/api/accounts/login/status?state=${encodeURIComponent(state)}`),
   renameAccount: (id, name) => alova.Put(`/api/accounts/${encodeURIComponent(id)}`, { name }),
   deleteAccount: (id) => alova.Delete(`/api/accounts/${encodeURIComponent(id)}`),

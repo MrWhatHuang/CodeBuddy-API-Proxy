@@ -290,6 +290,22 @@ async function route(req, res) {
     return;
   }
 
+  if (pathname === '/api/accounts/import' && method === 'POST') {
+    try {
+      const buf = await util.readBody(req);
+      const body = buf.length ? JSON.parse(buf.toString('utf8')) : {};
+      const refreshToken = (body && typeof body.refreshToken === 'string') ? body.refreshToken.trim() : '';
+      const name = (body && typeof body.name === 'string') ? body.name.trim() : '';
+      const domain = (body && typeof body.domain === 'string') ? body.domain.trim() : '';
+      if (!refreshToken) { util.sendJson(res, 400, { error: { message: 'refreshToken 不能为空' } }); return; }
+      const acct = await auth.importByRefreshToken(refreshToken, name, domain);
+      util.sendJson(res, 200, { account: accountPublic(acct) });
+    } catch (e) {
+      util.sendJson(res, 400, { error: { message: '导入失败: ' + e.message } });
+    }
+    return;
+  }
+
   if (pathname === '/api/pool' && method === 'GET') {
     util.sendJson(res, 200, sessionMod.getPoolConfig());
     return;

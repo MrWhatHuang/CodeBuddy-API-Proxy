@@ -160,6 +160,62 @@ async function fetchAccounts(auth) {
   return [];
 }
 
+/** 用 refresh_token 手工导入账号：换 accessToken 并拉取账号信息 */
+async function importByRefreshToken(refreshToken, name, domain) {
+  if (!refreshToken || typeof refreshToken !== 'string' || !refreshToken.trim()) {
+    throw new Error('refreshToken 不能为空');
+  }
+  const rt = refreshToken.trim();
+  const dom = (domain && String(domain).trim()) || config.ENDPOINT_HOST;
+  const headers = {
+    'X-Refresh-Token': rt,
+    'X-Auth-Refresh-Source': 'plugin',
+    'X-Domain': dom,
+    'Content-Type': 'application/json',
+    'User-Agent': 'CodeBuddy-Proxy/1.0',
+  };
+  const r = await util.requestJson(authPath('/auth/token/refresh'), { method: 'POST', headers, body: {}, timeoutMs: 30000 });
+  const data = r.json && r.json.data;
+  if (!r.json || r.json.code !== 0 || !data || !data.accessToken) {
+    throw new Error('刷新失败（refresh_token 可能已失效）: ' + (r.json ? (r.json.msg || r.json.code) : r.body));
+  }
+  if (!data.expiresAt && data.expiresIn) data.expiresAt = Date.now() + data.expiresIn * 1000;
+  if (!data.refreshToken) data.refreshToken = rt;
+  if (!data.domain) data.domain = dom;
+  // 拉取账号信息（accessToken 换取）
+  let account = null;
+  try { account = await fetchAccountByToken(data); }
+  catch (e) { logger.log('warn', 'auth', '导入账号时获取账号信息失败: ' + e.message); account = { uid: '', nickname: '', type: 'personal' }; }
+  const accounts = await fetchAccounts(data).catch(function () { return []; });
+  const acct = sessionMod.addAccount({
+    name: (name && String(name).trim()) || '',
+    source: 'oauth',
+    account: account,
+    auth: data,
+    accounts: accounts,
+    lastUsedAt: 0,
+    useCount: 0,
+    createdAt: Date.now(),
+  });
+  if (!acct) throw new Error('账号写入失败');
+  logger.log('info', 'auth', '手动导入账号成功: ' + (acct.name || acct.account.nickname || acct.account.uid));
+  return acct;
+}
+
+/** 用 accessToken 拉取当前账号信息 */
+async function fetchAccountByToken(auth) {
+  const headers = Object.assign({}, buildNoAuthHeaders(), { 'Authorization': 'Bearer ' + auth.accessToken });
+  delete headers['X-No-Authorization'];
+  delete headers['X-No-User-Id'];
+  delete headers['X-No-Enterprise-Id'];
+  delete headers['X-No-Department-Info'];
+  const r = await util.requestJson(authPath('/login/account'), { method: 'GET', headers, timeoutMs: 15000 });
+  if (!r.json || r.json.code !== 0 || !r.json.data) {
+    throw new Error('获取账号失败: ' + (r.json ? (r.json.msg || r.json.code) : r.body));
+  }
+  return r.json.data;
+}
+
 /** 登录成功后把账号追加进池（携带 name 参数） */
 async function completeLogin(state, name) {
   const entry = pendingLogins.get(state);
@@ -194,5 +250,6 @@ module.exports = {
   refreshToken, getValidAccount, getValidSession,
   pickAccountForRequest, extractAccountKey,
   fetchAuthState, pollAuthToken, fetchAccount, fetchAccounts, completeLogin,
+  importByRefreshToken, fetchAccountByToken,
   pendingLogins,
 };

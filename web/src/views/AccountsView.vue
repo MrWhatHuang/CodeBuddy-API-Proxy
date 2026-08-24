@@ -13,6 +13,11 @@ const loading = ref(false);
 const notice = ref('');
 const showAdd = ref(false);
 const newName = ref('');
+const showImport = ref(false);
+const importRt = ref('');
+const importName = ref('');
+const importDomain = ref('');
+const importing = ref(false);
 
 const mode = computed({
   get: () => pool.value.mode,
@@ -67,6 +72,30 @@ async function doAdd() {
     showAdd.value = false;
   } catch (e) {
     notice.value = t('common.error') + ': ' + e.message;
+  }
+}
+
+async function openImport() {
+  showImport.value = true;
+  showAdd.value = false;
+  importRt.value = '';
+  importName.value = '';
+  importDomain.value = '';
+}
+
+async function doImport() {
+  if (!importRt.value.trim()) { notice.value = t('accounts.importRtRequired'); return; }
+  importing.value = true;
+  notice.value = '';
+  try {
+    await api.importAccount({ refreshToken: importRt.value.trim(), name: importName.value.trim(), domain: importDomain.value.trim() });
+    notice.value = t('accounts.importOk');
+    showImport.value = false;
+    load();
+  } catch (e) {
+    notice.value = t('common.error') + ': ' + e.message;
+  } finally {
+    importing.value = false;
   }
 }
 
@@ -135,6 +164,7 @@ load();
       <div class="head">
         <h2 class="card-title">{{ t('accounts.title') }}</h2>
         <button class="btn btn-primary" @click="openAdd">{{ t('accounts.add') }}</button>
+        <button class="btn btn-ghost" @click="openImport">{{ t('accounts.import') }}</button>
       </div>
 
       <div class="mode-row">
@@ -199,6 +229,21 @@ load();
         <button class="btn btn-ghost" @click="showAdd = false">{{ t('common.cancel') }}</button>
       </div>
     </div>
+
+    <div v-if="showImport" class="card add-card">
+      <h3 class="card-title">{{ t('accounts.importTitle') }}</h3>
+      <div class="field-label">{{ t('accounts.nameLabel') }}</div>
+      <input class="input" v-model="importName" :placeholder="t('accounts.namePlaceholder')" />
+      <div class="field-label">{{ t('accounts.importRt') }}</div>
+      <textarea class="input textarea" v-model="importRt" :placeholder="t('accounts.importRtPlaceholder')"></textarea>
+      <div class="field-label">{{ t('accounts.importDomain') }}</div>
+      <input class="input" v-model="importDomain" :placeholder="t('accounts.importDomainPlaceholder')" />
+      <p class="hint">{{ t('accounts.importHint') }}</p>
+      <div class="actions">
+        <button class="btn btn-primary" :disabled="importing" @click="doImport">{{ importing ? t('common.saving') : t('accounts.importConfirm') }}</button>
+        <button class="btn btn-ghost" @click="showImport = false">{{ t('common.cancel') }}</button>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -217,6 +262,7 @@ tr.pinned td { background: var(--primary-soft); }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
 .add-card { margin-top: 16px; }
 .input { width: 100%; max-width: 420px; }
+.textarea { min-height: 90px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; resize: vertical; }
 .actions { display: flex; gap: 10px; margin-top: 14px; }
 .badge { margin-right: 6px; }
 </style>
