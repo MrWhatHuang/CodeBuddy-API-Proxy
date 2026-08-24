@@ -165,6 +165,41 @@ async function route(req, res) {
     return;
   }
 
+  /* ---- API 密钥管理 ---- */
+  if (pathname === '/api/keys' && method === 'GET') {
+    util.sendJson(res, 200, { keys: store.listApiKeysPublic(), enabled: store.clientKeyVerificationEnabled() });
+    return;
+  }
+  if (pathname === '/api/keys' && method === 'POST') {
+    try {
+      const buf = await util.readBody(req);
+      const body = buf.length ? JSON.parse(buf.toString('utf8')) : {};
+      const r = store.addApiKey({ name: body && body.name, key: body && body.key });
+      if (r.error) { util.sendJson(res, 400, { error: { message: r.error } }); return; }
+      logger.log('info', 'config', `新增 API 密钥: ${r.key.name}`);
+      util.sendJson(res, 200, { key: r.key });
+    } catch (e) {
+      util.sendJson(res, 400, { error: { message: `新增密钥失败: ${e.message}` } });
+    }
+    return;
+  }
+  if (pathname.startsWith('/api/keys/regenerate/') && method === 'POST') {
+    const id = decodeURIComponent(pathname.slice('/api/keys/regenerate/'.length));
+    const r = store.regenerateApiKey(id);
+    if (r.error) { util.sendJson(res, 400, { error: { message: r.error } }); return; }
+    logger.log('info', 'config', `重新生成 API 密钥: ${r.key.name}`);
+    util.sendJson(res, 200, { key: r.key });
+    return;
+  }
+  if (pathname.startsWith('/api/keys/') && method === 'DELETE') {
+    const id = decodeURIComponent(pathname.slice('/api/keys/'.length));
+    const r = store.removeApiKey(id);
+    if (r.error) { util.sendJson(res, 400, { error: { message: r.error } }); return; }
+    logger.log('info', 'config', `删除 API 密钥: ${id}`);
+    util.sendJson(res, 200, { ok: true, id });
+    return;
+  }
+
   /* ---- 日志 ---- */
   if (pathname === '/api/logs' && method === 'GET') {
     const q = {
@@ -187,7 +222,38 @@ async function route(req, res) {
   }
 
   /* ---- 日志统计 ---- */
-  if (pathname === '/api/stats') { util.sendJson(res, 200, store.stats()); return; }
+  if (pathname === '/api/stats') {
+    const s = store.stats();
+    s.usage = store.usageTotals();
+    util.sendJson(res, 200, s);
+    return;
+  }
+
+  /* ---- 用量记录 ---- */
+  if (pathname === '/api/usage' && method === 'GET') {
+    const q = {
+      from: u.searchParams.get('from') || '',
+      to: u.searchParams.get('to') || '',
+      accountId: u.searchParams.get('accountId') || '',
+      apiKeyId: u.searchParams.get('apiKeyId') || '',
+      model: u.searchParams.get('model') || '',
+      status: u.searchParams.get('status') || '',
+      limit: u.searchParams.get('limit') || '50',
+      offset: u.searchParams.get('offset') || '0',
+    };
+    util.sendJson(res, 200, store.queryUsage(q));
+    return;
+  }
+  if (pathname === '/api/usage/stats' && method === 'GET') {
+    const dimension = u.searchParams.get('dimension') === 'apiKey' ? 'apiKey' : 'account';
+    const result = store.usageStatsByDay({
+      dimension,
+      from: u.searchParams.get('from') || '',
+      to: u.searchParams.get('to') || '',
+    });
+    util.sendJson(res, 200, { dimension, ...result, totals: store.usageTotals() });
+    return;
+  }
 
   /* ---- 从 VSCode 导入登录态 ---- */
   if (pathname === '/api/import-vscode') {

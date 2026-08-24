@@ -248,13 +248,14 @@ async function completeLogin(state, name) {
 }
 
 /**
- * 校验客户端 API 密钥（可选）。
- * 当配置了 apiKey 时，请求必须携带 `Authorization: Bearer <key>` 或 `X-API-Key: <key>`。
- * 返回 { ok: true } 或 { ok: false, message }。未配置密钥时始终放行。
+ * 校验客户端 API 密钥。
+ * 当「校验开关」开启时，请求必须携带 `Authorization: Bearer <key>` 或 `X-API-Key: <key>`，
+ * 且该密钥必须是 api_keys 表（或兼容的 CODEBUDDY_API_KEY）中已存在的。
+ * 返回 { ok: true, keyId, keyName } 或 { ok: false, message }。
+ * 校验开关关闭时始终放行（keyId/keyName 为空）。
  */
 function verifyClientKey(req) {
-  const expected = store.getConfig().apiKey;
-  if (!expected || !String(expected).trim()) return { ok: true };
+  if (!store.clientKeyVerificationEnabled()) return { ok: true, keyId: '', keyName: '' };
   const h = (req && req.headers) || {};
   const authHeader = String(h['authorization'] || h['Authorization'] || '');
   let provided = '';
@@ -264,12 +265,9 @@ function verifyClientKey(req) {
 
   if (!provided) return { ok: false, message: '缺少 API 密钥（请在 Authorization: Bearer 或 X-API-Key 头提供）' };
 
-  const a = Buffer.from(String(expected).trim());
-  const b = Buffer.from(provided);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    return { ok: false, message: 'API 密钥无效' };
-  }
-  return { ok: true };
+  const matched = store.resolveApiKey(provided);
+  if (!matched) return { ok: false, message: 'API 密钥无效' };
+  return { ok: true, keyId: matched.id, keyName: matched.name };
 }
 
 module.exports = {

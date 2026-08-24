@@ -112,6 +112,26 @@ async function handleProxy(req, res, pathname) {
     return true;
   }
 
+  const accountId = acct ? acct.id : '';
+  const accountName = acct ? (acct.name || (acct.account && (acct.account.nickname || acct.account.uid)) || '') : '';
+
+  // 记录一次用量
+  const record = (usage, status) => {
+    store.recordUsage({
+      source: pathname,
+      model: payload.model || '',
+      stream: !!payload.stream,
+      accountId, accountName,
+      apiKeyId: keyCheck.keyId || '', apiKeyName: keyCheck.keyName || '',
+      promptTokens: usage && usage.prompt_tokens,
+      completionTokens: usage && usage.completion_tokens,
+      totalTokens: usage && usage.total_tokens,
+      cachedTokens: usage && (usage.prompt_cache_hit_tokens || (usage.prompt_tokens_details && usage.prompt_tokens_details.cached_tokens)),
+      durationMs: Date.now() - startedAt,
+      status,
+    });
+  };
+
   const headers = {
     ...auth.buildAuthHeaders(acct),
     'Content-Type': 'application/json',
@@ -127,21 +147,24 @@ async function handleProxy(req, res, pathname) {
       if (ct.includes('text/event-stream') || r.body.includes('chat.completion.chunk')) {
         const completion = aggregateSseToCompletion(r.body);
         logger.log('info', 'proxy', `${pathname} 完成 (${Date.now() - startedAt}ms)`, logger.requestSummary(payload, { stream: false, status: 200, durationMs: Date.now() - startedAt, tokens: completion.usage && completion.usage.total_tokens }));
+        record(completion.usage, 'ok');
         util.sendJson(res, 200, completion);
       } else {
         logger.log('warn', 'proxy', `${pathname} 上游非流式响应 ${r.status}`, logger.requestSummary(payload, { status: r.status, durationMs: Date.now() - startedAt }));
+        record(null, r.status === 200 ? 'ok' : 'error');
         res.writeHead(r.status, { 'Content-Type': ct || 'application/json', 'Access-Control-Allow-Origin': '*' });
         res.end(r.body);
       }
     } else if (isStream) {
-      await util.pipeToClient(res, targetUrl, {
+      await util.pipeSseToClient(res, targetUrl, {
         method: 'POST', headers, body: jsonBody,
         extraHeaders: { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' },
-      });
+      }, ({ usage, status }) => record(usage, status));
       logger.log('info', 'proxy', `${pathname} 流式结束 (${Date.now() - startedAt}ms)`, logger.requestSummary(payload, { stream: true, durationMs: Date.now() - startedAt }));
     } else {
       const r = await util.requestJson(targetUrl, { method: 'POST', headers, body: jsonBody, timeoutMs });
       logger.log('info', 'proxy', `${pathname} 完成 (${Date.now() - startedAt}ms)`, logger.requestSummary(payload, { stream: false, status: r.status, durationMs: Date.now() - startedAt }));
+      record(r.json && r.json.usage, r.status === 200 ? 'ok' : 'error');
       res.writeHead(r.status, {
         'Content-Type': (r.headers && r.headers['content-type']) || 'application/json',
         'Access-Control-Allow-Origin': '*',
@@ -150,6 +173,7 @@ async function handleProxy(req, res, pathname) {
     }
   } catch (e) {
     logger.log('error', 'proxy', `${pathname} 上游错误: ${e.message}`, logger.requestSummary(payload, { stream: isStream, durationMs: Date.now() - startedAt }));
+    record(null, 'error');
     if (!res.headersSent) util.sendJson(res, 502, { error: { message: `upstream error: ${e.message}`, type: 'proxy_upstream_error' } });
     else res.end();
   }

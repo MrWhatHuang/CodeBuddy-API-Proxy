@@ -87,6 +87,84 @@ function pipeToClient(clientRes, urlStr, { method = 'POST', headers = {}, body =
   });
 }
 
+/**
+ * 把上游 SSE 流转发到客户端，同时解析其中的 token 用量。
+ * onDone({ usage, status }) 在流结束时回调。usage 为 OpenAI chat.completion.chunk 里的 usage 对象。
+ * 兼容 `stream_options.include_usage` 的最后一块，也兼容流结束后单独追加的 usage 块。
+ */
+function pipeSseToClient(clientRes, urlStr, { method = 'POST', headers = {}, body = null, extraHeaders = {} }, onDone) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(urlStr);
+    const mod = u.protocol === 'https:' ? https : http;
+    const payload = body == null ? null : (typeof body === 'string' ? body : JSON.stringify(body));
+    const finalHeaders = { ...headers };
+    if (payload != null && !finalHeaders['Content-Type']) finalHeaders['Content-Type'] = 'application/json';
+    if (payload != null) finalHeaders['Content-Length'] = Buffer.byteLength(payload);
+
+    let usage = null;
+    let status = 'ok';
+    const report = () => { if (onDone) try { onDone({ usage, status }); } catch { /* ignore */ } };
+
+    const upstream = mod.request(u, { method, headers: finalHeaders }, (upRes) => {
+      const respHeaders = { ...(upRes.headers || {}), ...extraHeaders };
+      clientRes.writeHead(upRes.statusCode || 502, respHeaders);
+      if (upRes.statusCode !== 200) status = 'error';
+
+      let buf = '';
+      upRes.setEncoding('utf8');
+      upRes.on('data', (chunk) => {
+        buf += chunk;
+        // 边写边解析，尽量低延迟转发
+        clientRes.write(chunk);
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+          const block = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          for (const line of block.split('\n')) {
+            const t = line.trim();
+            if (!t.startsWith('data:')) continue;
+            const data = t.slice(5).trim();
+            if (!data || data === '[DONE]') continue;
+            try {
+              const obj = JSON.parse(data);
+              if (obj && obj.usage) usage = obj.usage;
+            } catch { /* skip */ }
+          }
+        }
+      });
+      upRes.on('end', () => {
+        if (buf.trim()) {
+          for (const line of buf.split('\n')) {
+            const t = line.trim();
+            if (!t.startsWith('data:')) continue;
+            const data = t.slice(5).trim();
+            if (!data || data === '[DONE]') continue;
+            try {
+              const obj = JSON.parse(data);
+              if (obj && obj.usage) usage = obj.usage;
+            } catch { /* skip */ }
+          }
+        }
+        clientRes.end();
+        report();
+        resolve();
+      });
+      upRes.on('error', (e) => { status = 'error'; report(); reject(e); });
+    });
+    upstream.on('error', (e) => {
+      if (!clientRes.headersSent) {
+        clientRes.writeHead(502, { 'Content-Type': 'application/json' });
+        clientRes.end(JSON.stringify({ error: { message: `upstream error: ${e.message}`, type: 'proxy_upstream_error' } }));
+      }
+      status = 'error';
+      report();
+      reject(e);
+    });
+    if (payload != null) upstream.write(payload);
+    upstream.end();
+  });
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -173,7 +251,7 @@ function genId(prefix) {
 }
 
 module.exports = {
-  requestJson, requestRaw, pipeToClient, readBody,
+  requestJson, requestRaw, pipeToClient, pipeSseToClient, readBody,
   sendJson, sendHtml, sendFile, MIME_TYPES, corsHeaders,
   escapeHtml, maskedToken, genId,
 };

@@ -320,7 +320,7 @@ function streamChatToResponses(clientRes, urlStr, headers, body, originalReq) {
             clientRes.write(`event: response.failed\ndata: ${JSON.stringify(ev)}\n\n`);
             clientRes.end();
           }
-          resolve();
+          resolve({ usage: state.usage, model: state.model, status: upRes.statusCode === 200 ? 'ok' : 'error' });
         });
         upRes.on('error', reject);
         return;
@@ -353,7 +353,7 @@ function streamChatToResponses(clientRes, urlStr, headers, body, originalReq) {
           }
         }
         finish();
-        resolve();
+        resolve({ usage: state.usage, model: state.model, status: upRes.statusCode === 200 ? 'ok' : 'error' });
       });
       upRes.on('error', reject);
     });
@@ -409,6 +409,28 @@ async function handleResponses(req, res) {
     return;
   }
 
+  const accountId = acct ? acct.id : '';
+  const accountName = acct ? (acct.name || (acct.account && (acct.account.nickname || acct.account.uid)) || '') : '';
+  const record = (usage, status) => {
+    const cached =
+      (usage && usage.prompt_cache_hit_tokens) ||
+      (usage && usage.input_tokens_details && usage.input_tokens_details.cached_tokens) ||
+      (usage && usage.prompt_tokens_details && usage.prompt_tokens_details.cached_tokens) || 0;
+    store.recordUsage({
+      source: '/v1/responses',
+      model: chatPayload.model || payload.model || '',
+      stream: !!payload.stream,
+      accountId, accountName,
+      apiKeyId: keyCheck.keyId || '', apiKeyName: keyCheck.keyName || '',
+      promptTokens: usage && (usage.prompt_tokens != null ? usage.prompt_tokens : usage.input_tokens),
+      completionTokens: usage && (usage.completion_tokens != null ? usage.completion_tokens : usage.output_tokens),
+      totalTokens: usage && (usage.total_tokens != null ? usage.total_tokens : (usage.input_tokens + usage.output_tokens)),
+      cachedTokens: cached,
+      durationMs: Date.now() - startedAt,
+      status,
+    });
+  };
+
   const headers = { ...auth.buildAuthHeaders(acct), 'Content-Type': 'application/json', 'Accept': 'text/event-stream' };
   const targetUrl = `${config.ENDPOINT}/v2/chat/completions`;
   const jsonBody = JSON.stringify(chatPayload);
@@ -417,22 +439,26 @@ async function handleResponses(req, res) {
   try {
     if (payload.stream) {
       res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'Access-Control-Allow-Origin': '*', 'X-Accel-Buffering': 'no' });
-      await streamChatToResponses(res, targetUrl, headers, jsonBody, payload);
+      const done = await streamChatToResponses(res, targetUrl, headers, jsonBody, payload);
       logger.log('info', 'responses', `流式结束 (${Date.now() - startedAt}ms)`, logger.requestSummary(payload, { stream: true, durationMs: Date.now() - startedAt }));
+      record(done && done.usage, (done && done.status) || 'ok');
     } else {
       const r = await util.requestRaw(targetUrl, { method: 'POST', headers, body: jsonBody, timeoutMs });
       const ct = (r.headers && r.headers['content-type']) || '';
       if (ct.includes('text/event-stream') || r.body.includes('chat.completion.chunk')) {
         const completion = openai.aggregateSseToCompletion(r.body);
         logger.log('info', 'responses', `完成 (${Date.now() - startedAt}ms)`, logger.requestSummary(payload, { stream: false, durationMs: Date.now() - startedAt, tokens: completion.usage && completion.usage.total_tokens }));
+        record(completion.usage, 'ok');
         util.sendJson(res, 200, chatCompletionToResponse(completion, payload));
       } else {
+        record(null, r.status === 200 ? 'ok' : 'error');
         res.writeHead(r.status, { 'Content-Type': ct || 'application/json', 'Access-Control-Allow-Origin': '*' });
         res.end(r.body);
       }
     }
   } catch (e) {
     logger.log('error', 'responses', `上游错误: ${e.message}`, logger.requestSummary(payload, { durationMs: Date.now() - startedAt }));
+    record(null, 'error');
     if (!res.headersSent) util.sendJson(res, 502, { error: { message: `upstream error: ${e.message}`, type: 'proxy_upstream_error' } });
     else res.end();
   }

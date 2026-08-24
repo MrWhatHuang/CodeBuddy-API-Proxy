@@ -42,6 +42,7 @@ function start() {
 
     const session = sessionMod.getSession();
     const cfg = store.getConfig();
+    store.ensureDefaultApiKey();
 
     console.log('');
     console.log('  CodeBuddy API Proxy 已启动');
@@ -63,6 +64,9 @@ function start() {
     }
     console.log(`  session:    ${config.SESSION_FILE}`);
     console.log(`  数据库:     ${config.DB_FILE}`);
+    const keyEnabled = store.clientKeyVerificationEnabled();
+    const keyCount = store.listApiKeys().length;
+    console.log(`  API 密钥:   ${keyEnabled ? `已启用 (${keyCount} 个密钥)` : '未启用（关闭校验）'}`);
     console.log('');
 
     logger.log('info', 'system', `服务已启动 (v${config.VERSION})`, { host: config.HOST, port: config.PORT, endpoint: config.ENDPOINT });
