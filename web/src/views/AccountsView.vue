@@ -26,6 +26,10 @@ const checkinMap = ref({});
 const checkinLoading = ref(false);
 const checkingId = ref('');
 
+// 积分余额：每个账号的剩余/总积分，key 为账号 id
+const creditsMap = ref({});
+const creditsLoading = ref(false);
+
 const mode = computed({
   get: () => pool.value.mode,
   set: (v) => setMode(v),
@@ -46,6 +50,29 @@ async function load() {
     loading.value = false;
   }
   loadCheckinAll();
+  loadCreditsAll();
+}
+
+// 查询单个账号的积分余额
+async function loadCredits(acct) {
+  try {
+    const r = await api.credits(acct.id);
+    if (r?.usageLeft !== undefined) {
+      creditsMap.value = { ...creditsMap.value, [acct.id]: r };
+    }
+  } catch (e) {
+    creditsMap.value = { ...creditsMap.value, [acct.id]: { __error: e?.message || t('accounts.creditsFail') } };
+  }
+}
+
+// 并行查询所有账号的积分余额（不阻塞，静默失败）
+async function loadCreditsAll() {
+  creditsLoading.value = true;
+  try {
+    await Promise.allSettled(accounts.value.map((a) => loadCredits(a)));
+  } finally {
+    creditsLoading.value = false;
+  }
 }
 
 // 查询单个账号的签到状态
@@ -93,6 +120,14 @@ function checkinState(acct) {
   if (s.active === false) return { kind: 'off', text: t('accounts.checkinActivityOff') };
   if (s.today_checked_in) return { kind: 'done', text: t('accounts.checkinToday') };
   return { kind: 'todo', text: t('accounts.checkinNotToday') };
+}
+
+function creditsText(acct) {
+  const c = creditsMap.value[acct.id];
+  if (!c) return '';
+  if (c.__error) return '-';
+  const left = typeof c.usageLeft === 'number' ? c.usageLeft : 0;
+  return String(left);
 }
 
 async function setMode(v) {
@@ -298,6 +333,7 @@ load();
               <th>{{ t('overview.source') }}</th>
               <th>{{ t('overview.tokenExpire') }}</th>
               <th>{{ t('accounts.colUsed') }}</th>
+              <th>{{ t('accounts.credits') }}</th>
               <th>{{ t('accounts.checkin') }}</th>
               <th></th>
             </tr>
@@ -313,6 +349,10 @@ load();
               <td>{{ sourceText(a.source) }}</td>
               <td class="muted">{{ fmt(a.expiresAt) }}</td>
               <td class="muted">{{ a.useCount }} / {{ fmt(a.lastUsedAt) }}</td>
+              <td class="credits-cell">
+                <span v-if="creditsText(a)" class="credits-value">{{ creditsText(a) }}</span>
+                <span v-else class="muted">{{ creditsLoading ? t('common.loading') : '-' }}</span>
+              </td>
               <td>
                 <template v-if="checkinState(a)">
                   <span class="checkin-state" :class="checkinState(a).kind">{{ checkinState(a).text }}</span>
@@ -407,6 +447,8 @@ tr.pinned td { background: var(--primary-soft); }
 .checkin-state.todo { color: var(--warning, #d29922); }
 .checkin-state.off { color: var(--text-2); }
 .checkin-state.error { color: var(--danger, #f85149); }
+.credits-cell { white-space: nowrap; }
+.credits-value { font-weight: 600; color: var(--text); }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
 .add-card { margin-top: 16px; }
 .input { width: 100%; max-width: 420px; }

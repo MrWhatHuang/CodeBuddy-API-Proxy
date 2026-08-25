@@ -334,6 +334,8 @@ export default {
     checkinSuccess: '签到成功',
     checkinAlready: '今日已签到',
     checkinUnknown: '未知',
+    credits: '积分余额',
+    creditsFail: '查询积分失败',
   },
   login: {
     title: '正在登录 CodeBuddy…',

@@ -67,6 +67,7 @@ export const api = {
   usageStats: (params = {}) => alova.Get(withQuery('/api/usage/stats', params)),
   checkinStatus: (accountId) => alova.Get(withQuery('/api/checkin/status', { accountId })),
   dailyCheckin: (accountId) => alova.Post('/api/checkin', { accountId }),
+  credits: (accountId) => alova.Get(withQuery('/api/credits', { accountId })),
 
   // 管理页鉴权
   adminStatus: () => alova.Get('/api/admin/status'),

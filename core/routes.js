@@ -18,6 +18,7 @@ const auth = require('./auth');
 const openai = require('./openai');
 const responses = require('./responses');
 const checkin = require('./checkin');
+const credits = require('./credits');
 const adminAuth = require('./adminAuth');
 
 /* ============================ 状态对象 ============================ */
@@ -550,6 +551,20 @@ async function route(req, res) {
     } catch (e) {
       const status = e && e.status === 404 ? 404 : 502;
       util.sendJson(res, status, { error: { message: '签到失败: ' + e.message } });
+    }
+    return;
+  }
+
+  /* ---- 积分余额（可指定账号） ---- */
+  if (pathname === '/api/credits' && method === 'GET') {
+    try {
+      const accountId = u.searchParams.get('accountId') || '';
+      const r = await credits.getCredits(accountId);
+      if (!r.ok) { util.sendJson(res, 502, { error: { message: r.error || '查询积分余额失败' } }); return; }
+      util.sendJson(res, 200, r);
+    } catch (e) {
+      const status = e && e.status === 404 ? 404 : 502;
+      util.sendJson(res, status, { error: { message: '查询积分余额失败: ' + e.message } });
     }
     return;
   }

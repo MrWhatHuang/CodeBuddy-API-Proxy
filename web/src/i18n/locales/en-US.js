@@ -334,6 +334,8 @@ export default {
     checkinSuccess: 'Checked in',
     checkinAlready: 'Already checked in today',
     checkinUnknown: 'Unknown',
+    credits: 'Credits',
+    creditsFail: 'Failed to load credits',
   },
   login: {
     title: 'Signing in to CodeBuddy…',
