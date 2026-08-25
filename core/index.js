@@ -31,12 +31,14 @@ function start() {
   });
 
   server.listen(config.PORT, config.HOST, () => {
-    // 1) 优先读 VSCode 插件登录态；2) 其次本地缓存；3) 都没有则提示登录
+    // 1) 先加载本地账号池（含旧 session.json 一次性迁移）；2) 其次优先同步 VSCode 插件登录态
+    sessionMod.loadSession();
     const vs = vscode.readVscodeSession();
     if (vs && vs.session) {
       sessionMod.setSession(vs.session, 'vscode');
       sessionMod.saveSession();
-    } else if (!sessionMod.loadSession()) {
+    }
+    if (!sessionMod.isLoggedIn()) {
       logger.log('info', 'auth', '未找到 VSCode 登录态，也未找到本地缓存，等待用户登录');
     }
 

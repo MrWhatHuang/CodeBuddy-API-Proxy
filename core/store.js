@@ -88,6 +88,29 @@ function getDb() {
     CREATE INDEX IF NOT EXISTS idx_usage_account ON usage(account_id);
     CREATE INDEX IF NOT EXISTS idx_usage_key ON usage(api_key_id);
     CREATE INDEX IF NOT EXISTS idx_usage_model ON usage(model);
+
+    -- 账号池：登录态（含 accessToken/refreshToken 等敏感凭证）与账号信息
+    CREATE TABLE IF NOT EXISTS accounts (
+      id            TEXT PRIMARY KEY,
+      name          TEXT NOT NULL DEFAULT '',
+      source        TEXT NOT NULL DEFAULT 'file',  -- vscode | oauth | manual | file（旧数据迁移）
+      added_by      TEXT NOT NULL DEFAULT 'file',  -- 添加方式：vscode(解析导入) | oauth(网页登录) | manual(手工导入) | migrate(旧 session 迁移)
+      account       TEXT NOT NULL DEFAULT '{}',    -- JSON：{ uid, nickname, type, enterpriseId, ... }
+      auth          TEXT NOT NULL DEFAULT '{}',    -- JSON：{ accessToken, refreshToken, domain, expiresAt, ... }
+      accounts      TEXT NOT NULL DEFAULT '[]',    -- JSON：该账号可切换的子账号列表
+      last_used_at  INTEGER NOT NULL DEFAULT 0,
+      use_count     INTEGER NOT NULL DEFAULT 0,
+      created_at    INTEGER NOT NULL,
+      updated_at    INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_accounts_source ON accounts(source);
+
+    -- 账号池配置（单行：version=2 固定），mode/strategy/pinnedId/cursor 存为 JSON
+    CREATE TABLE IF NOT EXISTS account_pool (
+      id      INTEGER PRIMARY KEY CHECK (id = 1),
+      config  TEXT NOT NULL DEFAULT '{}',
+      updated_at INTEGER NOT NULL DEFAULT 0
+    );
     `);
 
   // 兼容旧库：若 usage 表缺少 cached_tokens 列则补充
@@ -658,7 +681,131 @@ function usageTotals() {
   };
 }
 
+/* ============================ 账号池（登录态迁移到 SQLite） ============================ */
+
+function safeParseJson(s, fallback) {
+  if (!s) return fallback;
+  try { return JSON.parse(s); } catch { return fallback; }
+}
+
+function accountRowToObject(r) {
+  return {
+    id: r.id,
+    name: r.name || '',
+    source: r.source || 'file',
+    addedBy: r.added_by || 'file',
+    account: safeParseJson(r.account, {}),
+    auth: safeParseJson(r.auth, {}),
+    accounts: safeParseJson(r.accounts, []),
+    lastUsedAt: r.last_used_at || 0,
+    useCount: r.use_count || 0,
+    createdAt: r.created_at || 0,
+    updatedAt: r.updated_at || 0,
+  };
+}
+
+/** 列出账号池全部账号（按创建时间升序，保持旧 session 数组顺序语义） */
+function listAccountRows() {
+  const rows = getDb().prepare('SELECT * FROM accounts ORDER BY created_at ASC, id ASC').all();
+  return rows.map(accountRowToObject);
+}
+
+function getAccountRow(id) {
+  if (!id) return null;
+  const r = getDb().prepare('SELECT * FROM accounts WHERE id = ?').get(id);
+  return r ? accountRowToObject(r) : null;
+}
+
+/**
+ * 新增账号（持久化到 accounts 表）。
+ * acct: { id?, name?, source?, addedBy?, account?, auth?, accounts?, lastUsedAt?, useCount?, createdAt? }
+ */
+function insertAccount(acct) {
+  if (!acct || typeof acct !== 'object') return null;
+  const id = acct.id || ('acct_' + crypto.randomBytes(12).toString('hex'));
+  const name = String(acct.name || '');
+  const source = String(acct.source || 'file');
+  const addedBy = String(acct.addedBy || source || 'file');
+  const account = acct.account || {};
+  const auth = acct.auth || {};
+  const accounts = Array.isArray(acct.accounts) ? acct.accounts : [];
+  const createdAt = Number(acct.createdAt) || Date.now();
+  const now = Date.now();
+  getDb().prepare(
+    'INSERT INTO accounts(id, name, source, added_by, account, auth, accounts, last_used_at, use_count, created_at, updated_at) ' +
+    'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+    'ON CONFLICT(id) DO UPDATE SET ' +
+    'name=excluded.name, source=excluded.source, added_by=excluded.added_by, ' +
+    'account=excluded.account, auth=excluded.auth, accounts=excluded.accounts, ' +
+    'last_used_at=excluded.last_used_at, use_count=excluded.use_count, updated_at=excluded.updated_at'
+  ).run(
+    id, name, source, addedBy,
+    JSON.stringify(account), JSON.stringify(auth), JSON.stringify(accounts),
+    Number(acct.lastUsedAt) || 0, Number(acct.useCount) || 0, createdAt, now
+  );
+  return getAccountRow(id);
+}
+
+/** 更新账号（按 id），patch 支持 name / auth / account / source / addedBy / lastUsedAt / useCount */
+function updateAccountRow(id, patch) {
+  if (!id || !patch || typeof patch !== 'object') return getAccountRow(id);
+  const existing = getAccountRow(id);
+  if (!existing) return null;
+  const next = Object.assign({}, existing, patch);
+  getDb().prepare(
+    'UPDATE accounts SET name=?, source=?, added_by=?, account=?, auth=?, accounts=?, last_used_at=?, use_count=?, updated_at=? WHERE id=?'
+  ).run(
+    String(next.name || ''),
+    String(next.source || 'file'),
+    String(next.addedBy || next.source || 'file'),
+    JSON.stringify(next.account || {}),
+    JSON.stringify(next.auth || {}),
+    JSON.stringify(Array.isArray(next.accounts) ? next.accounts : []),
+    Number(next.lastUsedAt) || 0,
+    Number(next.useCount) || 0,
+    Date.now(),
+    id
+  );
+  return getAccountRow(id);
+}
+
+function deleteAccountRow(id) {
+  const r = getDb().prepare('DELETE FROM accounts WHERE id = ?').run(id);
+  return r.changes > 0;
+}
+
+function accountCount() {
+  return getDb().prepare('SELECT COUNT(*) AS n FROM accounts').get().n;
+}
+
+/* ---- 账号池配置（单行存储，version=2 固定） ---- */
+
+function defaultPoolConfig() {
+  return { version: 2, pool: { mode: 'pool', strategy: 'round-robin', pinnedId: null, cursor: 0 } };
+}
+
+function getAccountPool() {
+  const r = getDb().prepare("SELECT config FROM account_pool WHERE id = 1").get();
+  if (!r) return defaultPoolConfig();
+  const cfg = safeParseJson(r.config, null);
+  if (!cfg || typeof cfg !== 'object') return defaultPoolConfig();
+  return Object.assign(defaultPoolConfig(), cfg);
+}
+
+function setAccountPool(config) {
+  const cfg = config && typeof config === 'object' ? config : defaultPoolConfig();
+  const now = Date.now();
+  getDb().prepare(
+    'INSERT INTO account_pool(id, config, updated_at) VALUES(1, ?, ?) ON CONFLICT(id) DO UPDATE SET config=excluded.config, updated_at=excluded.updated_at'
+  ).run(JSON.stringify(cfg), now);
+  return getAccountPool();
+}
+
 module.exports = {
+  // 账号池（登录态已迁移到 SQLite）
+  listAccountRows, getAccountRow, insertAccount, updateAccountRow, deleteAccountRow, accountCount,
+  getAccountPool, setAccountPool, defaultPoolConfig,
+
   // 自定义模型
   addModel, listModels, removeModel, getModel,
 

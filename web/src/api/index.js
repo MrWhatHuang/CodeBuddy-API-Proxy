@@ -57,4 +57,6 @@ export const api = {
   deleteKey: (id) => alova.Delete(`/api/keys/${encodeURIComponent(id)}`),
   usage: (params = {}) => alova.Get(withQuery('/api/usage', params)),
   usageStats: (params = {}) => alova.Get(withQuery('/api/usage/stats', params)),
+  checkinStatus: (accountId) => alova.Get(withQuery('/api/checkin/status', { accountId })),
+  dailyCheckin: (accountId) => alova.Post('/api/checkin', { accountId }),
 };

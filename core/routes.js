@@ -17,6 +17,7 @@ const vscode = require('./vscode');
 const auth = require('./auth');
 const openai = require('./openai');
 const responses = require('./responses');
+const checkin = require('./checkin');
 
 /* ============================ 状态对象 ============================ */
 
@@ -28,6 +29,7 @@ function accountPublic(acct) {
     id: acct.id,
     name: acct.name || '',
     source: acct.source || 'file',
+    addedBy: acct.addedBy || acct.source || 'file',
     uid: a.uid || '',
     nickname: a.nickname || '',
     type: a.type || 'personal',
@@ -273,6 +275,7 @@ async function route(req, res) {
       const acct = sessionMod.addAccount({
         name: '',
         source: 'vscode',
+        addedBy: 'vscode',
         account: r.session.account,
         auth: r.session.auth,
         accounts: r.session.accounts || [],
@@ -426,6 +429,34 @@ async function route(req, res) {
     if (!removed) { util.sendJson(res, 404, { error: { message: '未找到该账号' } }); return; }
     logger.log('info', 'auth', '账号已删除: ' + id);
     util.sendJson(res, 200, { ok: true, id });
+    return;
+  }
+
+  /* ---- 每日签到（可指定账号） ---- */
+  if (pathname === '/api/checkin/status' && method === 'GET') {
+    try {
+      const accountId = u.searchParams.get('accountId') || '';
+      const r = await checkin.checkinStatus(accountId);
+      if (!r.ok) { util.sendJson(res, 502, { error: { message: r.error || '查询签到状态失败' } }); return; }
+      util.sendJson(res, 200, r);
+    } catch (e) {
+      const status = e && e.status === 404 ? 404 : 502;
+      util.sendJson(res, status, { error: { message: '查询签到状态失败: ' + e.message } });
+    }
+    return;
+  }
+  if (pathname === '/api/checkin' && method === 'POST') {
+    try {
+      const buf = await util.readBody(req);
+      const body = buf.length ? JSON.parse(buf.toString('utf8')) : {};
+      const accountId = (body && typeof body.accountId === 'string' && body.accountId) ? body.accountId : '';
+      const r = await checkin.dailyCheckin(accountId);
+      if (!r.ok) { util.sendJson(res, 502, { error: { message: r.error || '签到失败' } }); return; }
+      util.sendJson(res, 200, r);
+    } catch (e) {
+      const status = e && e.status === 404 ? 404 : 502;
+      util.sendJson(res, status, { error: { message: '签到失败: ' + e.message } });
+    }
     return;
   }
 

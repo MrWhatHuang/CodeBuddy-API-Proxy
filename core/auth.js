@@ -191,7 +191,8 @@ async function importByRefreshToken(refreshToken, name, domain) {
   const accounts = await fetchAccounts(data).catch(function () { return []; });
   const acct = sessionMod.addAccount({
     name: (name && String(name).trim()) || '',
-    source: 'oauth',
+    source: 'manual',
+    addedBy: 'manual',
     account: account,
     auth: data,
     accounts: accounts,
@@ -200,7 +201,7 @@ async function importByRefreshToken(refreshToken, name, domain) {
     createdAt: Date.now(),
   });
   if (!acct) throw new Error('账号写入失败');
-  logger.log('info', 'auth', '手动导入账号成功: ' + (acct.name || acct.account.nickname || acct.account.uid));
+  logger.log('info', 'auth', '手工导入账号成功: ' + (acct.name || acct.account.nickname || acct.account.uid));
   return acct;
 }
 
@@ -231,6 +232,7 @@ async function completeLogin(state, name) {
     const acct = sessionMod.addAccount({
       name: (name && String(name).trim()) || '',
       source: 'oauth',
+      addedBy: 'oauth',
       account: account,
       auth: auth,
       accounts: accounts,

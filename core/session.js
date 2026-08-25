@@ -1,15 +1,20 @@
 'use strict';
 
-/** 会话状态：账号池（多 OAuth 账号）、归一化、读写本地缓存、退出清理 */
+/**
+ * 会话状态：账号池（多 OAuth / VSCode / 手工导入账号）、归一化、读写本地存储、退出清理。
+ *
+ * 存储已从本地 session.json 迁移到 SQLite（core/store.js 的 accounts / account_pool 表）。
+ * 本模块保留原有对外 API 不变，仅把持久化后端替换为数据库；首次启动时自动迁移旧 session.json。
+ */
 
 const fs = require('fs');
-const path = require('path');
 const crypto = require('crypto');
 const config = require('./config');
 const logger = require('./logger');
+const store = require('./store');
 
-let state = null;
-let sessionSource = '';
+let state = null;          // 内存态：{ version, pool, accounts[] }
+let sessionSource = '';    // 最近一次账号来源：vscode | oauth | manual | file
 
 function genId() {
   return 'acct_' + crypto.randomBytes(12).toString('hex');
@@ -50,10 +55,12 @@ function normalizePoolAccount(acct) {
   if (!acct || !acct.auth || !acct.auth.accessToken) return null;
   const n = normalizeSession({ account: acct.account, auth: acct.auth, accounts: acct.accounts });
   if (!n) return null;
+  const source = acct.source || acct.addedBy || 'file';
   return {
     id: acct.id || genId(),
     name: acct.name || n.account.nickname || n.account.uid || '未命名',
-    source: acct.source || 'file',
+    source,
+    addedBy: acct.addedBy || source,
     account: n.account,
     auth: n.auth,
     accounts: n.accounts,
@@ -88,6 +95,7 @@ function normalizePool(data) {
       id: genId(),
       name: norm.account.nickname || norm.account.uid || '账号 1',
       source: sessionSource || 'file',
+      addedBy: sessionSource || 'file',
       account: norm.account,
       auth: norm.auth,
       accounts: norm.accounts,
@@ -102,34 +110,129 @@ function emptyPool() {
   return { version: 2, pool: { mode: 'pool', strategy: 'round-robin', pinnedId: null, cursor: 0 }, accounts: [] };
 }
 
-function loadSession() {
-  try {
-    if (fs.existsSync(config.SESSION_FILE)) {
-      const data = JSON.parse(fs.readFileSync(config.SESSION_FILE, 'utf8'));
-      const pool = normalizePool(data);
-      if (pool) {
-        state = pool;
-        sessionSource = 'file';
-        if (pool.accounts.length) persistPool();
-        return true;
-      }
-    }
-  } catch (e) { logger.log('warn', 'system', '加载本地 session 失败: ' + e.message); }
-  return false;
+/** 从 SQLite 载入账号池到内存态 */
+function loadFromDb() {
+  const accounts = store.listAccountRows().map(function (r) {
+    return {
+      id: r.id,
+      name: r.name,
+      source: r.source,
+      addedBy: r.addedBy,
+      account: r.account,
+      auth: r.auth,
+      accounts: r.accounts,
+      lastUsedAt: r.lastUsedAt,
+      useCount: r.useCount,
+      createdAt: r.createdAt,
+    };
+  });
+  const poolCfg = store.getAccountPool();
+  state = {
+    version: 2,
+    pool: poolCfg.pool || { mode: 'pool', strategy: 'round-robin', pinnedId: null, cursor: 0 },
+    accounts,
+  };
+  return true;
 }
 
-function persistPool() {
+/**
+ * 一次性迁移：若 DB 尚无账号、且旧 session.json 存在，则把旧文件里的账号导入 DB，
+ * 并把来源标记为 migrate（保留原始 source 到 addedBy 之外单独用 source 存原值，便于追溯）。
+ */
+function migrateLegacySession() {
+  if (store.accountCount() > 0) return false;
+  const file = config.SESSION_FILE;
+  if (!fs.existsSync(file)) return false;
   try {
-    fs.mkdirSync(path.dirname(config.SESSION_FILE), { recursive: true });
-    fs.writeFileSync(config.SESSION_FILE, JSON.stringify(state, null, 2), { mode: 0o600 });
-  } catch (e) { logger.log('error', 'system', '保存 session 失败: ' + e.message); }
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const pool = normalizePool(raw);
+    if (!pool || !pool.accounts.length) return false;
+    for (const acct of pool.accounts) {
+      store.insertAccount({
+        id: acct.id,
+        name: acct.name,
+        source: acct.source || 'file',
+        addedBy: 'migrate',               // 添加方式统一标记为 migrate（从旧 session.json 迁移）
+        account: acct.account,
+        auth: acct.auth,
+        accounts: acct.accounts,
+        lastUsedAt: acct.lastUsedAt,
+        useCount: acct.useCount,
+        createdAt: acct.createdAt,
+      });
+    }
+    store.setAccountPool(pool);
+    logger.log('info', 'system', '已从旧 session.json 迁移 ' + pool.accounts.length + ' 个账号到数据库');
+    // 迁移成功后重命名旧文件，避免后续被误读（保留一份可回滚的 .migrated 备份）
+    const bak = file + '.migrated';
+    try {
+      if (fs.existsSync(bak)) fs.unlinkSync(bak);
+      fs.renameSync(file, bak);
+      logger.log('info', 'system', '旧 session.json 已重命名为 session.json.migrated');
+    } catch (e2) {
+      logger.log('warn', 'system', '重命名旧 session.json 失败（不影响迁移）: ' + e2.message);
+    }
+    return true;
+  } catch (e) {
+    logger.log('warn', 'system', '迁移旧 session.json 失败: ' + e.message);
+    return false;
+  }
+}
+
+function loadSession() {
+  try {
+    migrateLegacySession();
+    loadFromDb();
+    if (state.accounts.length) {
+      sessionSource = state.accounts[0].source || 'file';
+    }
+    return state.accounts.length > 0;
+  } catch (e) {
+    logger.log('warn', 'system', '加载账号池失败: ' + e.message);
+    state = emptyPool();
+    return false;
+  }
+}
+
+/** 把内存态整体写回数据库（账号 + 池配置） */
+function persistPool() {
+  if (!state) return;
+  try {
+    store.setAccountPool(state);
+    // 账号行以逐条 upsert 同步（以内存态为准）
+    const knownIds = new Set(state.accounts.map(function (a) { return a.id; }));
+    for (const acct of state.accounts) {
+      store.insertAccount({
+        id: acct.id,
+        name: acct.name,
+        source: acct.source,
+        addedBy: acct.addedBy || acct.source,
+        account: acct.account,
+        auth: acct.auth,
+        accounts: acct.accounts,
+        lastUsedAt: acct.lastUsedAt,
+        useCount: acct.useCount,
+        createdAt: acct.createdAt,
+      });
+    }
+    // 删除 DB 中已不在内存态的账号
+    for (const r of store.listAccountRows()) {
+      if (!knownIds.has(r.id)) store.deleteAccountRow(r.id);
+    }
+  } catch (e) {
+    logger.log('error', 'system', '保存账号池失败: ' + e.message);
+  }
 }
 
 function saveSession() { persistPool(); }
 
 function clearSession() {
-  state = emptyPool(); sessionSource = '';
-  try { if (fs.existsSync(config.SESSION_FILE)) fs.unlinkSync(config.SESSION_FILE); } catch (e) { /* ignore */ }
+  state = emptyPool();
+  sessionSource = '';
+  try {
+    for (const r of store.listAccountRows()) store.deleteAccountRow(r.id);
+    store.setAccountPool(emptyPool());
+  } catch (e) { /* ignore */ }
 }
 
 function getPool() { return state; }
@@ -137,6 +240,7 @@ function getPool() { return state; }
 function setPool(pool, source) {
   state = normalizePool(pool) || emptyPool();
   if (source) sessionSource = source;
+  persistPool();
 }
 
 /* ---------------- 账号操作 ---------------- */
@@ -175,6 +279,7 @@ function updateAccount(id, patch) {
     if (patch.lastUsedAt != null) acct.lastUsedAt = patch.lastUsedAt;
     if (patch.useCount != null) acct.useCount = patch.useCount;
     if (patch.source) acct.source = patch.source;
+    if (patch.addedBy) acct.addedBy = patch.addedBy;
   }
   persistPool();
   return acct;
@@ -258,6 +363,7 @@ function getActiveAccount() {
 }
 
 function getSession() { return getActiveAccount(); }
+
 function setSession(s, source) {
   if (!state) state = emptyPool();
   const norm = normalizeSession(s);
@@ -269,13 +375,26 @@ function setSession(s, source) {
       existing.accounts = norm.accounts;
       if (!existing.name) existing.name = norm.account.nickname || norm.account.uid || '账号 1';
       existing.source = source || existing.source;
+      existing.addedBy = existing.addedBy || source;
     } else {
-      addAccount({ id: genId(), name: norm.account.nickname || norm.account.uid || '账号 1', source: source || 'oauth', account: norm.account, auth: norm.auth, accounts: norm.accounts, lastUsedAt: 0, useCount: 0, createdAt: Date.now() });
+      addAccount({
+        id: genId(),
+        name: norm.account.nickname || norm.account.uid || '账号 1',
+        source: source || 'oauth',
+        addedBy: source || 'oauth',
+        account: norm.account,
+        auth: norm.auth,
+        accounts: norm.accounts,
+        lastUsedAt: 0,
+        useCount: 0,
+        createdAt: Date.now(),
+      });
     }
     persistPool();
   }
   if (source) sessionSource = source;
 }
+
 function getSessionSource() { return sessionSource; }
 
 module.exports = {

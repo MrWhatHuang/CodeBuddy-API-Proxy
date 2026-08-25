@@ -21,6 +21,11 @@ const importing = ref(false);
 const showVscode = ref(false);
 const importingVscode = ref(false);
 
+// 每日签到：每个账号的签到状态，key 为账号 id
+const checkinMap = ref({});
+const checkinLoading = ref(false);
+const checkingId = ref('');
+
 const mode = computed({
   get: () => pool.value.mode,
   set: (v) => setMode(v),
@@ -40,6 +45,54 @@ async function load() {
   } finally {
     loading.value = false;
   }
+  loadCheckinAll();
+}
+
+// 查询单个账号的签到状态
+async function loadCheckin(acct) {
+  try {
+    const r = await api.checkinStatus(acct.id);
+    if (r?.data) {
+      checkinMap.value = { ...checkinMap.value, [acct.id]: r.data };
+    }
+  } catch (e) {
+    checkinMap.value = { ...checkinMap.value, [acct.id]: { __error: e?.message || t('accounts.checkinFail') } };
+  }
+}
+
+// 并行查询所有账号的签到状态（不阻塞，静默失败）
+async function loadCheckinAll() {
+  checkinLoading.value = true;
+  try {
+    await Promise.allSettled(accounts.value.map((a) => loadCheckin(a)));
+  } finally {
+    checkinLoading.value = false;
+  }
+}
+
+// 执行单个账号签到
+async function doCheckin(acct) {
+  if (checkingId.value) return;
+  checkingId.value = acct.id;
+  try {
+    const r = await api.dailyCheckin(acct.id);
+    if (r?.alreadyCheckedIn) notice.value = t('accounts.checkinAlready') + '：' + (acct.name || acct.nickname || acct.uid);
+    else notice.value = t('accounts.checkinSuccess') + '：' + (acct.name || acct.nickname || acct.uid);
+  } catch (e) {
+    notice.value = t('accounts.checkinFail') + '：' + (acct.name || acct.nickname || acct.uid) + ' — ' + e.message;
+  } finally {
+    checkingId.value = '';
+    await loadCheckin(acct);
+  }
+}
+
+function checkinState(acct) {
+  const s = checkinMap.value[acct.id];
+  if (!s) return null;
+  if (s.__error) return { kind: 'error', text: s.__error };
+  if (s.active === false) return { kind: 'off', text: t('accounts.checkinActivityOff') };
+  if (s.today_checked_in) return { kind: 'done', text: t('accounts.checkinToday') };
+  return { kind: 'todo', text: t('accounts.checkinNotToday') };
 }
 
 async function setMode(v) {
@@ -245,6 +298,7 @@ load();
               <th>{{ t('overview.source') }}</th>
               <th>{{ t('overview.tokenExpire') }}</th>
               <th>{{ t('accounts.colUsed') }}</th>
+              <th>{{ t('accounts.checkin') }}</th>
               <th></th>
             </tr>
           </thead>
@@ -259,7 +313,14 @@ load();
               <td>{{ sourceText(a.source) }}</td>
               <td class="muted">{{ fmt(a.expiresAt) }}</td>
               <td class="muted">{{ a.useCount }} / {{ fmt(a.lastUsedAt) }}</td>
+              <td>
+                <template v-if="checkinState(a)">
+                  <span class="checkin-state" :class="checkinState(a).kind">{{ checkinState(a).text }}</span>
+                </template>
+                <span v-else class="muted">{{ checkinLoading ? t('common.loading') : '-' }}</span>
+              </td>
               <td class="ops">
+                <button class="btn btn-ghost btn-sm" :disabled="!!checkingId" @click="doCheckin(a)">{{ checkingId === a.id ? t('accounts.checkinDoing') : t('accounts.checkin') }}</button>
                 <button class="btn btn-ghost btn-sm" @click="pin(a.id)">{{ t('accounts.pin') }}</button>
                 <button class="btn btn-ghost btn-sm" @click="rename(a)">{{ t('common.edit') }}</button>
                 <button class="btn btn-danger btn-sm" @click="remove(a)">{{ t('common.delete') }}</button>
@@ -341,6 +402,11 @@ load();
 tr.pinned td { background: var(--primary-soft); }
 .strong { font-weight: 600; }
 .ops { display: flex; gap: 6px; justify-content: flex-end; white-space: nowrap; }
+.checkin-state { font-size: 12px; font-weight: 600; white-space: nowrap; }
+.checkin-state.done { color: var(--success, #3fb950); }
+.checkin-state.todo { color: var(--warning, #d29922); }
+.checkin-state.off { color: var(--text-2); }
+.checkin-state.error { color: var(--danger, #f85149); }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
 .add-card { margin-top: 16px; }
 .input { width: 100%; max-width: 420px; }
