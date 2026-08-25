@@ -71,9 +71,24 @@ async function getValidSession() {
   return getValidAccount(acct);
 }
 
-/** 根据请求选择账号并校验。explicitKey 来自 header/body；空则走池 */
-async function pickAccountForRequest(explicitKey) {
-  const acct = sessionMod.pickAccount(explicitKey);
+/**
+ * 根据请求选择账号并校验。
+ * 优先级：header/body 显式指定 > 关闭池模式（pinned 强制账号）> 密钥绑定账号 > 账号池。
+ * @param {string} [explicitKey] 来自 header/body 的显式账号指定
+ * @param {string} [keyAccountId] API 密钥绑定的账号 id（空 = 未绑定）
+ */
+async function pickAccountForRequest(explicitKey, keyAccountId) {
+  const pool = sessionMod.getPoolConfig();
+  let acct = null;
+  if (explicitKey) {
+    acct = sessionMod.findAccountByIdOrName(explicitKey);
+  } else if (pool.mode === 'pinned' && pool.pinnedId) {
+    acct = sessionMod.getAccount(pool.pinnedId);
+  } else if (keyAccountId) {
+    acct = sessionMod.findAccountByIdOrName(keyAccountId);
+  } else {
+    acct = sessionMod.pickAccount(null);
+  }
   if (!acct) throw new Error('未登录，请先打开管理页登录');
   const valid = await getValidAccount(acct);
   sessionMod.markUsed(valid.id);
@@ -254,8 +269,8 @@ async function completeLogin(state, name) {
  * 校验客户端 API 密钥。
  * 当「校验开关」开启时，请求必须携带 `Authorization: Bearer <key>` 或 `X-API-Key: <key>`，
  * 且该密钥必须是 api_keys 表（或兼容的 CODEBUDDY_API_KEY）中已存在的。
- * 返回 { ok: true, keyId, keyName } 或 { ok: false, message }。
- * 校验开关关闭时始终放行（keyId/keyName 为空）。
+ * 返回 { ok: true, keyId, keyName, accountId } 或 { ok: false, message }。
+ * 校验开关关闭时始终放行（keyId/keyName/accountId 为空）。
  */
 function verifyClientKey(req) {
   if (!store.clientKeyVerificationEnabled()) return { ok: true, keyId: '', keyName: '' };
@@ -282,7 +297,7 @@ function verifyClientKey(req) {
     return { ok: false, message: 'API 密钥无效' };
   }
   store.rateLimitReset(rlKey);
-  return { ok: true, keyId: matched.id, keyName: matched.name };
+  return { ok: true, keyId: matched.id, keyName: matched.name, accountId: matched.accountId || '' };
 }
 
 module.exports = {

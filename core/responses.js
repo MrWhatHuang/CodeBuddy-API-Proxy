@@ -403,7 +403,7 @@ async function handleResponses(req, res) {
 
   const accountKey = auth.extractAccountKey(req, payload);
   let acct;
-  try { acct = await auth.pickAccountForRequest(accountKey); }
+  try { acct = await auth.pickAccountForRequest(accountKey, keyCheck.accountId || ''); }
   catch (e) {
     logger.log('warn', 'responses', `拒绝: ${e.message}`);
     util.sendJson(res, 401, { error: { message: e.message, type: 'authentication_error' } });

@@ -277,12 +277,27 @@ async function route(req, res) {
     try {
       const buf = await util.readBody(req);
       const body = buf.length ? JSON.parse(buf.toString('utf8')) : {};
-      const r = store.addApiKey({ name: body && body.name, key: body && body.key });
+      const r = store.addApiKey({ name: body && body.name, key: body && body.key, accountId: body && body.accountId });
       if (r.error) { util.sendJson(res, 400, { error: { message: r.error } }); return; }
       logger.log('info', 'config', `新增 API 密钥: ${r.key.name}`);
       util.sendJson(res, 200, { key: r.key });
     } catch (e) {
       util.sendJson(res, 400, { error: { message: `新增密钥失败: ${e.message}` } });
+    }
+    return;
+  }
+  if (pathname.startsWith('/api/keys/') && method === 'PUT') {
+    const id = decodeURIComponent(pathname.slice('/api/keys/'.length));
+    try {
+      const buf = await util.readBody(req);
+      const body = buf.length ? JSON.parse(buf.toString('utf8')) : {};
+      const accountId = (body && body.accountId !== undefined) ? String(body.accountId).trim() : '';
+      const r = store.setApiKeyAccount(id, accountId);
+      if (r.error) { util.sendJson(res, 400, { error: { message: r.error } }); return; }
+      logger.log('info', 'config', `API 密钥账号已更新: ${r.key.name} -> ${accountId || '(账号池)'}`);
+      util.sendJson(res, 200, { key: r.key });
+    } catch (e) {
+      util.sendJson(res, 400, { error: { message: `更新密钥账号失败: ${e.message}` } });
     }
     return;
   }

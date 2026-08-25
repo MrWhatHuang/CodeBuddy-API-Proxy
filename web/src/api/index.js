@@ -62,6 +62,7 @@ export const api = {
   listKeys: () => alova.Get('/api/keys'),
   addKey: (payload) => alova.Post('/api/keys', payload),
   regenerateKey: (id) => alova.Post(`/api/keys/regenerate/${encodeURIComponent(id)}`),
+  setKeyAccount: (id, accountId) => alova.Put(`/api/keys/${encodeURIComponent(id)}`, { accountId }),
   deleteKey: (id) => alova.Delete(`/api/keys/${encodeURIComponent(id)}`),
   usage: (params = {}) => alova.Get(withQuery('/api/usage', params)),
   usageStats: (params = {}) => alova.Get(withQuery('/api/usage/stats', params)),

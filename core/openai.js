@@ -106,7 +106,7 @@ async function handleProxy(req, res, pathname) {
 
   const accountKey = auth.extractAccountKey(req, payload);
   let acct;
-  try { acct = await auth.pickAccountForRequest(accountKey); }
+  try { acct = await auth.pickAccountForRequest(accountKey, keyCheck.accountId || ''); }
   catch (e) {
     logger.log('warn', 'proxy', `${pathname} 拒绝: ${e.message}`, { pathname, model: payload.model });
     util.sendJson(res, 401, { error: { message: e.message, type: 'authentication_error' } });

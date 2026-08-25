@@ -61,6 +61,7 @@ function getDb() {
       id           TEXT PRIMARY KEY,
       name         TEXT NOT NULL DEFAULT '',
       key          TEXT NOT NULL,
+      account_id   TEXT NOT NULL DEFAULT '',  -- 绑定的账号 id；空 = 走账号池
       created_at   INTEGER NOT NULL,
       last_used_at INTEGER NOT NULL DEFAULT 0,
       use_count    INTEGER NOT NULL DEFAULT 0
@@ -149,6 +150,13 @@ function getDb() {
     const cols = db.prepare("PRAGMA table_info(usage)").all().map((c) => c.name);
     if (!cols.includes('cached_tokens')) {
       db.exec('ALTER TABLE usage ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0');
+    }
+  } catch { /* 表不存在或已就绪则忽略 */ }
+  // 兼容旧库：若 api_keys 表缺少 account_id 列则补充
+  try {
+    const cols = db.prepare("PRAGMA table_info(api_keys)").all().map((c) => c.name);
+    if (!cols.includes('account_id')) {
+      db.exec("ALTER TABLE api_keys ADD COLUMN account_id TEXT NOT NULL DEFAULT ''");
     }
   } catch { /* 表不存在或已就绪则忽略 */ }
   return db;
@@ -462,6 +470,7 @@ function listApiKeys() {
     name: r.name || '',
     key: maskKey(r.key),
     fullKey: r.key,
+    accountId: r.account_id || '',
     createdAt: r.created_at,
     lastUsedAt: r.last_used_at,
     useCount: r.use_count,
@@ -478,19 +487,20 @@ function getApiKey(id) {
   return r || null;
 }
 
-/** 新增密钥。name 必填（可为默认）。返回完整密钥对象（含 fullKey，仅创建时）。 */
-function addApiKey({ name, key } = {}) {
+/** 新增密钥。name 必填（可为默认），accountId 可选（空 = 走账号池）。返回完整密钥对象（含 fullKey，仅创建时）。 */
+function addApiKey({ name, key, accountId } = {}) {
   const d = getDb();
   const nm = (name && String(name).trim()) || 'default';
   const k = (key && String(key).trim()) || generateApiKey();
+  const aid = (accountId && String(accountId).trim()) || '';
   if (!/^[A-Za-z0-9_-]{16,}$/.test(k)) return { error: '密钥格式无效（仅允许字母、数字及 _ -，至少 16 位）' };
   const exists = d.prepare('SELECT id FROM api_keys WHERE key = ?').get(k);
   if (exists) return { error: '密钥已存在' };
   const id = genId();
   const createdAt = Date.now();
-  d.prepare('INSERT INTO api_keys(id, name, key, created_at) VALUES(?, ?, ?, ?)')
-    .run(id, nm, k, createdAt);
-  return { key: { id, name: nm, key: maskKey(k), fullKey: k, createdAt, lastUsedAt: 0, useCount: 0 } };
+  d.prepare('INSERT INTO api_keys(id, name, key, account_id, created_at) VALUES(?, ?, ?, ?, ?)')
+    .run(id, nm, k, aid, createdAt);
+  return { key: { id, name: nm, key: maskKey(k), fullKey: k, accountId: aid, createdAt, lastUsedAt: 0, useCount: 0 } };
 }
 
 /** 重新生成指定密钥的明文值。返回 { key: {..含 fullKey} }。 */
@@ -499,7 +509,7 @@ function regenerateApiKey(id) {
   if (!r) return { error: '未找到该密钥' };
   const k = generateApiKey();
   getDb().prepare('UPDATE api_keys SET key = ? WHERE id = ?').run(k, id);
-  return { key: { id: r.id, name: r.name || '', key: maskKey(k), fullKey: k, createdAt: r.created_at, lastUsedAt: r.last_used_at, useCount: r.use_count } };
+  return { key: { id: r.id, name: r.name || '', key: maskKey(k), fullKey: k, accountId: r.account_id || '', createdAt: r.created_at, lastUsedAt: r.last_used_at, useCount: r.use_count } };
 }
 
 function removeApiKey(id) {
@@ -508,21 +518,31 @@ function removeApiKey(id) {
   return { ok: true, id };
 }
 
+/** 更新指定密钥绑定的账号（accountId 空 = 走账号池）。返回更新后的公开密钥对象。 */
+function setApiKeyAccount(id, accountId) {
+  const existing = getApiKey(id);
+  if (!existing) return { error: '未找到该密钥' };
+  const aid = (accountId && String(accountId).trim()) || '';
+  getDb().prepare('UPDATE api_keys SET account_id = ? WHERE id = ?').run(aid, id);
+  const updated = getApiKey(id);
+  return { key: { id: updated.id, name: updated.name || '', key: maskKey(updated.key), accountId: updated.account_id || '', createdAt: updated.created_at, lastUsedAt: updated.last_used_at, useCount: updated.use_count } };
+}
+
 /** 校验提供的明文密钥是否命中任一存储密钥（常数时间比较）。命中则更新最近使用。 */
 function apiKeyValid(provided) {
   return !!resolveApiKey(provided);
 }
 
-/** 返回命中的密钥信息 { id, name }，未命中返回 null。会更新最近使用。 */
+/** 返回命中的密钥信息 { id, name, accountId }，未命中返回 null。会更新最近使用。 */
 function resolveApiKey(provided) {
   const d = getDb();
-  const rows = d.prepare('SELECT id, name, key FROM api_keys').all();
+  const rows = d.prepare('SELECT id, name, key, account_id FROM api_keys').all();
   const b = Buffer.from(String(provided));
   for (const r of rows) {
     const a = Buffer.from(r.key);
     if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
       d.prepare('UPDATE api_keys SET last_used_at = ?, use_count = use_count + 1 WHERE key = ?').run(Date.now(), r.key);
-      return { id: r.id, name: r.name || '' };
+      return { id: r.id, name: r.name || '', accountId: r.account_id || '' };
     }
   }
   return null;
@@ -1045,7 +1065,7 @@ module.exports = {
 
   // API 密钥
   ensureDefaultApiKey, listApiKeys, listApiKeysPublic, addApiKey,
-  regenerateApiKey, removeApiKey, apiKeyValid, resolveApiKey, clientKeyVerificationEnabled,
+  regenerateApiKey, removeApiKey, setApiKeyAccount, apiKeyValid, resolveApiKey, clientKeyVerificationEnabled,
 
   // 用量记录
   recordUsage, queryUsage, usageStatsByDay, usageTotals,

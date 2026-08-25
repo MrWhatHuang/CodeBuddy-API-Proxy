@@ -9,6 +9,20 @@ const { t } = useI18n();
 const { data: keyData, loading, send: reload } = useRequest(() => api.listKeys());
 const { data: cfg, send: reloadConfig } = useRequest(() => api.config());
 
+const accounts = ref([]);
+async function loadAccounts() {
+  try {
+    const r = await api.listAccounts();
+    accounts.value = r.accounts || [];
+  } catch { /* 静默失败 */ }
+}
+loadAccounts();
+
+function accountLabel(a) {
+  if (!a) return '';
+  return a.name || a.nickname || a.uid || a.id;
+}
+
 const keys = computed(() => keyData.value?.keys || []);
 const enabled = computed(() => {
   // 以 API 密钥页返回的 enabled 为准；未加载时回退到 config
@@ -37,13 +51,14 @@ async function toggleEnabled(newVal) {
 const showForm = ref(false);
 const saving = ref(false);
 const formError = ref('');
-const form = reactive({ name: '', key: '', auto: true });
+const form = reactive({ name: '', key: '', auto: true, accountId: '' });
 
 function openAdd() {
   formError.value = '';
   form.name = '';
   form.key = '';
   form.auto = true;
+  form.accountId = '';
   showForm.value = true;
 }
 
@@ -51,7 +66,7 @@ async function submitForm() {
   saving.value = true;
   formError.value = '';
   try {
-    const payload = { name: form.name.trim() };
+    const payload = { name: form.name.trim(), accountId: form.accountId || '' };
     if (!form.auto && form.key.trim()) payload.key = form.key.trim();
     await api.addKey(payload);
     showForm.value = false;
@@ -117,6 +132,22 @@ async function remove(k) {
   }
 }
 
+const updatingAccount = ref(new Set());
+async function changeAccount(k, accountId) {
+  updatingAccount.value = new Set([...updatingAccount.value, k.id]);
+  try {
+    await api.setKeyAccount(k.id, accountId || '');
+    await reload();
+  } catch (e) {
+    alert(`${t('apikeys.deleteError')}: ${e.message}`);
+    await reload();
+  } finally {
+    const s = new Set(updatingAccount.value);
+    s.delete(k.id);
+    updatingAccount.value = s;
+  }
+}
+
 function fmtTime(ts) {
   if (!ts) return '—';
   return new Date(ts).toLocaleString();
@@ -162,6 +193,7 @@ function fmtTime(ts) {
             <tr>
               <th>{{ t('apikeys.colName') }}</th>
               <th>{{ t('apikeys.colKey') }}</th>
+              <th>{{ t('apikeys.colAccount') }}</th>
               <th>{{ t('apikeys.colCreated') }}</th>
               <th>{{ t('apikeys.colUsed') }}</th>
               <th></th>
@@ -182,6 +214,17 @@ function fmtTime(ts) {
                 </button>
                 <button class="btn btn-ghost btn-sm" @click="copyKey(k)">{{ t('apikeys.copy') }}</button>
                 <div v-if="isRevealed(k)" class="hint" style="margin-top: 4px">{{ t('apikeys.copiedHint') }}</div>
+              </td>
+              <td>
+                <select
+                  class="input account-select"
+                  :value="k.accountId || ''"
+                  :disabled="updatingAccount.has(k.id)"
+                  @change="changeAccount(k, $event.target.value)"
+                >
+                  <option value="">{{ t('apikeys.accountPool') }}</option>
+                  <option v-for="a in accounts" :key="a.id" :value="a.id">{{ accountLabel(a) }}</option>
+                </select>
               </td>
               <td class="muted">{{ fmtTime(k.createdAt) }}</td>
               <td>
@@ -206,6 +249,15 @@ function fmtTime(ts) {
         <div class="field">
           <label>{{ t('apikeys.nameLabel') }}</label>
           <input v-model="form.name" type="text" class="input" :placeholder="t('apikeys.namePlaceholder')" />
+        </div>
+
+        <div class="field">
+          <label>{{ t('apikeys.colAccount') }}</label>
+          <select v-model="form.accountId" class="input">
+            <option value="">{{ t('apikeys.accountPool') }}</option>
+            <option v-for="a in accounts" :key="a.id" :value="a.id">{{ accountLabel(a) }}</option>
+          </select>
+          <div class="hint" style="margin-top: 4px">{{ t('apikeys.accountHint') }}</div>
         </div>
 
         <div class="field">
@@ -246,6 +298,7 @@ function fmtTime(ts) {
 .setting-label { font-weight: 600; font-size: 14px; }
 .table-wrap { overflow-x: auto; }
 .key-cell { font-size: 12px; }
+.account-select { min-width: 140px; max-width: 200px; }
 .actions { white-space: nowrap; }
 .btn-sm { padding: 4px 10px; font-size: 12px; margin-left: 6px; }
 .btn-danger { color: var(--danger); border-color: var(--danger-soft); }
