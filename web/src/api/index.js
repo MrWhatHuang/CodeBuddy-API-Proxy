@@ -14,6 +14,14 @@ export const alova = createAlova({
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
       const msg = body?.error?.message || body?.error || `HTTP ${response.status}`;
+      // 管理页鉴权失效：跳转到登录页
+      if (response.status === 401 && body?.error?.type === 'admin_auth_required') {
+        const path = window.location.pathname;
+        if (path !== '/admin-login') {
+          const back = path === '/home' ? '' : '?back=' + encodeURIComponent(path);
+          window.location.href = '/admin-login' + back;
+        }
+      }
       throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
     }
     return body;
@@ -59,4 +67,10 @@ export const api = {
   usageStats: (params = {}) => alova.Get(withQuery('/api/usage/stats', params)),
   checkinStatus: (accountId) => alova.Get(withQuery('/api/checkin/status', { accountId })),
   dailyCheckin: (accountId) => alova.Post('/api/checkin', { accountId }),
+
+  // 管理页鉴权
+  adminStatus: () => alova.Get('/api/admin/status'),
+  adminLogin: (payload) => alova.Post('/api/admin/login', payload),
+  adminLogout: () => alova.Post('/api/admin/logout'),
+  adminChangePassword: (payload) => alova.Post('/api/admin/change-password', payload),
 };

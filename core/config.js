@@ -32,6 +32,25 @@ const VERSION = (() => {
   try { return require('../package.json').version || '1.0.0'; } catch { return '1.0.0'; }
 })();
 
+const ADMIN_USERNAME = process.env.CODEBUDDY_ADMIN_USERNAME || 'admin';
+const ADMIN_PASSWORD = process.env.CODEBUDDY_ADMIN_PASSWORD || '';
+
+/**
+ * 是否信任反向代理（如 Cloudflare / nginx）注入的 X-Forwarded-For。
+ * 仅在确认服务只被受信代理访问时设为 true，否则限流/日志将信任客户端可伪造的 IP。
+ * 取值：'true' | '1' 开启；其余（含空）关闭。
+ */
+const TRUST_PROXY = process.env.CODEBUDDY_TRUST_PROXY === 'true' || process.env.CODEBUDDY_TRUST_PROXY === '1';
+
+/** 会话 Cookie 名称（HttpOnly，前端不可读） */
+const ADMIN_COOKIE = 'cbp_admin';
+/** 会话有效期（毫秒）：默认 30 天 */
+const ADMIN_SESSION_TTL_MS = 30 * 24 * 3600 * 1000;
+/** 会话滑动续期阈值：剩余时间低于该值则自动续期 */
+const ADMIN_SESSION_RENEW_MS = 24 * 3600 * 1000;
+/** 密码哈希参数（scrypt）：N=16384, r=8, p=1（约 16MB 内存，Node 默认上限内） */
+const ADMIN_SCRYPT = { N: 1 << 14, r: 8, p: 1, keyLen: 64 };
+
 /**
  * 系统配置默认值（可被 DB 中的 config 表覆盖）。
  * 值统一存成字符串，读取处再做类型转换。
@@ -47,6 +66,7 @@ const DEFAULT_CONFIG = {
   'forceModel': process.env.CODEBUDDY_FORCE_MODEL || '',
   'apiKeyEnabled': 'true',                            // 是否校验客户端访问 /v1 与 /responses 所需的 API 密钥
   'apiKey': process.env.CODEBUDDY_API_KEY || '',      // 兼容旧版：单个 API 密钥（新实现优先使用 api_keys 表）
+  'adminAuthEnabled': 'false',         // 是否开启管理页/管理接口鉴权（登录后访问）
   'requestTimeoutMs': '300000',       // 上游请求超时
   'cors.origin': '*',                 // CORS Allow-Origin
 };
@@ -59,4 +79,6 @@ module.exports = {
   DATA_DIR, SESSION_FILE, DB_FILE, DIST_DIR, ENDPOINT_HOST,
   LOGIN_TIMEOUT_MS, LOGIN_POLL_INTERVAL_MS, REFRESH_AHEAD_MS,
   VERSION, DEFAULT_CONFIG, LOG_LEVELS, LOG_CATEGORIES,
+  ADMIN_USERNAME, ADMIN_PASSWORD, ADMIN_COOKIE, TRUST_PROXY,
+  ADMIN_SESSION_TTL_MS, ADMIN_SESSION_RENEW_MS, ADMIN_SCRYPT,
 };

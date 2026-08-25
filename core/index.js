@@ -3,6 +3,7 @@
 /** 服务端装配入口：创建 HTTP 服务、读取登录态、打印启动信息、可选自动打开管理页 */
 
 const http = require('http');
+const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
 const config = require('./config');
@@ -46,6 +47,14 @@ function start() {
     const cfg = store.getConfig();
     store.ensureDefaultApiKey();
 
+    // 管理页鉴权：首次启动时初始化管理员密码（优先环境变量，否则生成一次性初始密码）
+    let adminInitialPassword = '';
+    if (!store.adminConfigured()) {
+      adminInitialPassword = config.ADMIN_PASSWORD || crypto.randomBytes(9).toString('base64url');
+      store.setAdminPassword(config.ADMIN_USERNAME, adminInitialPassword, { mustChange: !config.ADMIN_PASSWORD });
+      logger.log('info', 'auth', '管理页管理员账号已初始化: ' + config.ADMIN_USERNAME);
+    }
+
     console.log('');
     console.log('  CodeBuddy API Proxy 已启动');
     console.log('  ------------------------------------');
@@ -68,7 +77,18 @@ function start() {
     console.log(`  数据库:     ${config.DB_FILE}`);
     const keyEnabled = store.clientKeyVerificationEnabled();
     const keyCount = store.listApiKeys().length;
-    console.log(`  API 密钥:   ${keyEnabled ? `已启用 (${keyCount} 个密钥)` : '未启用（关闭校验）'}`);
+    console.log(`  API 密钥:   ${keyEnabled ? `校验已启用 (${keyCount} 个密钥)` : '校验已关闭（任何请求都可通过，存在风险）'}`);
+    console.log(`  管理页鉴权: ${store.adminAuthEnabled() ? '已开启' : '未开启'}`);
+    console.log(`  信任代理:   ${config.TRUST_PROXY ? '是（信任 X-Forwarded-For）' : '否（使用直连 IP）'}`);
+    if (store.adminAuthEnabled()) {
+      console.log(`  管理员账号: ${config.ADMIN_USERNAME}`);
+      console.log(`  登录地址:   http://${config.HOST}:${config.PORT}/admin-login`);
+    }
+    if (adminInitialPassword) {
+      console.log('  ------------------------------------');
+      console.log(`  [重要] 管理页初始密码: ${adminInitialPassword}`);
+      console.log('  首次登录后请立即修改密码（若通过环境变量注入则可忽略）。');
+    }
     console.log('');
 
     logger.log('info', 'system', `服务已启动 (v${config.VERSION})`, { host: config.HOST, port: config.PORT, endpoint: config.ENDPOINT });

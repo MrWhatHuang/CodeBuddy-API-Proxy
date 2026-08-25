@@ -111,6 +111,37 @@ function getDb() {
       config  TEXT NOT NULL DEFAULT '{}',
       updated_at INTEGER NOT NULL DEFAULT 0
     );
+
+    -- 管理页管理员账号（单账号：username 主键）。password_hash 为 scrypt 派生结果（含盐）。
+    CREATE TABLE IF NOT EXISTS admin_users (
+      username        TEXT PRIMARY KEY,
+      password_hash   TEXT NOT NULL,          -- 格式：scrypt$N$r$p$salt$hash(hex)
+      must_change     INTEGER NOT NULL DEFAULT 0,  -- 1 = 下次登录需改密
+      created_at      INTEGER NOT NULL,
+      updated_at      INTEGER NOT NULL DEFAULT 0
+    );
+
+    -- 管理页登录会话（持久化，服务重启后仍有效）
+    CREATE TABLE IF NOT EXISTS admin_sessions (
+      token_hash      TEXT PRIMARY KEY,        -- 会话 token 的 sha256（不存明文）
+      username        TEXT NOT NULL,
+      created_at      INTEGER NOT NULL,
+      expires_at      INTEGER NOT NULL,
+      last_seen_at    INTEGER NOT NULL DEFAULT 0,
+      user_agent      TEXT NOT NULL DEFAULT '',
+      ip              TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires ON admin_sessions(expires_at);
+
+    -- 通用失败限流（持久化，服务重启后仍生效）。key 唯一（如 admin:ip|user、apikey:ip）
+    CREATE TABLE IF NOT EXISTS rate_limits (
+      key            TEXT PRIMARY KEY,
+      scope          TEXT NOT NULL DEFAULT '',   -- admin | apikey
+      fails          INTEGER NOT NULL DEFAULT 0,
+      window_start   INTEGER NOT NULL,
+      locked_until   INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_rate_limits_scope ON rate_limits(scope);
     `);
 
   // 兼容旧库：若 usage 表缺少 cached_tokens 列则补充
@@ -184,6 +215,9 @@ function publicValues(cfg) {
     corsOrigin: c['cors.origin'] || '*',
     apiKeyEnabled: asBool(c.apiKeyEnabled, true),
     apiKeyCount: listApiKeys().length,
+    adminAuthEnabled: asBool(c.adminAuthEnabled, false),
+    adminConfigured: adminConfigured(),
+    adminUsername: config.ADMIN_USERNAME,
   };
 }
 
@@ -204,6 +238,13 @@ function applyPublicPatch(body) {
   if (typeof body.forceModel === 'string') patch.forceModel = body.forceModel.trim();
   // 是否校验 API 密钥
   if (typeof body.apiKeyEnabled === 'boolean') patch.apiKeyEnabled = String(body.apiKeyEnabled);
+  // 是否开启管理页鉴权
+  if (typeof body.adminAuthEnabled === 'boolean') patch.adminAuthEnabled = String(body.adminAuthEnabled);
+  // 联动约束：开启管理页鉴权后，强制开启 API 密钥校验（避免「管理页锁了但 AI 接口裸奔」）。
+  // 以 patch 覆盖后的最终值为准，所以即使本次请求同时传了 adminAuthEnabled:true + apiKeyEnabled:false 也会被纠正。
+  const cur = getConfig();
+  const effAdmin = asBool('adminAuthEnabled' in patch ? patch.adminAuthEnabled : cur.adminAuthEnabled, false);
+  if (effAdmin) patch.apiKeyEnabled = 'true';
   // 兼容旧版：单个 API 密钥（空字符串表示不更新；非空则作为新密钥加入 keys 表）
   if (typeof body.apiKey === 'string' && body.apiKey.trim()) {
     addApiKey({ name: 'legacy', key: body.apiKey.trim() });
@@ -442,7 +483,7 @@ function addApiKey({ name, key } = {}) {
   const d = getDb();
   const nm = (name && String(name).trim()) || 'default';
   const k = (key && String(key).trim()) || generateApiKey();
-  if (!/^[A-Za-z0-9_-]{6,}$/.test(k)) return { error: '密钥格式无效（仅允许字母、数字及 _ -，至少 6 位）' };
+  if (!/^[A-Za-z0-9_-]{16,}$/.test(k)) return { error: '密钥格式无效（仅允许字母、数字及 _ -，至少 16 位）' };
   const exists = d.prepare('SELECT id FROM api_keys WHERE key = ?').get(k);
   if (exists) return { error: '密钥已存在' };
   const id = genId();
@@ -801,6 +842,195 @@ function setAccountPool(config) {
   return getAccountPool();
 }
 
+/* ============================ 管理页鉴权 ============================ */
+
+/** scrypt 派生密码哈希，返回 `scrypt$N$r$p$salt$hash`（salt/hash 均为 hex） */
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16);
+  const { N, r, p, keyLen } = config.ADMIN_SCRYPT;
+  const hash = crypto.scryptSync(String(password), salt, keyLen, { N, r, p });
+  return `scrypt$${N}$${r}$${p}$${salt.toString('hex')}$${hash.toString('hex')}`;
+}
+
+/** 常数时间校验密码。返回 true/false */
+function verifyPassword(password, stored) {
+  if (!stored || typeof stored !== 'string') return false;
+  const parts = stored.split('$');
+  if (parts.length !== 6 || parts[0] !== 'scrypt') return false;
+  const N = parseInt(parts[1], 10);
+  const r = parseInt(parts[2], 10);
+  const p = parseInt(parts[3], 10);
+  const salt = Buffer.from(parts[4], 'hex');
+  const expected = Buffer.from(parts[5], 'hex');
+  if (!Number.isFinite(N) || !Number.isFinite(r) || !Number.isFinite(p) || !salt.length || !expected.length) return false;
+  let actual;
+  try {
+    actual = crypto.scryptSync(String(password), salt, expected.length, { N, r, p });
+  } catch { return false; }
+  if (actual.length !== expected.length) return false;
+  return crypto.timingSafeEqual(actual, expected);
+}
+
+/** 管理员账号是否已设置密码 */
+function adminConfigured() {
+  const r = getDb().prepare('SELECT password_hash FROM admin_users WHERE username = ?').get(config.ADMIN_USERNAME);
+  return !!(r && r.password_hash);
+}
+
+/** 是否开启管理页鉴权（配置开关） */
+function adminAuthEnabled() {
+  return asBool(getConfig().adminAuthEnabled, false);
+}
+
+/** 获取管理员账号记录（不含敏感信息外泄，仅内部使用） */
+function getAdminUser(username) {
+  return getDb().prepare('SELECT * FROM admin_users WHERE username = ?').get(username || config.ADMIN_USERNAME) || null;
+}
+
+/** 设置/更新管理员密码。mustChange 为 true 表示下次登录强制改密 */
+function setAdminPassword(username, password, { mustChange = false } = {}) {
+  const u = username || config.ADMIN_USERNAME;
+  const hash = hashPassword(password);
+  const now = Date.now();
+  getDb().prepare(
+    'INSERT INTO admin_users(username, password_hash, must_change, created_at, updated_at) VALUES(?, ?, ?, ?, ?) ' +
+    'ON CONFLICT(username) DO UPDATE SET password_hash=excluded.password_hash, must_change=excluded.must_change, updated_at=excluded.updated_at'
+  ).run(u, hash, mustChange ? 1 : 0, now, now);
+  return true;
+}
+
+/** 校验管理员密码。返回 { ok, mustChange } */
+function verifyAdminPassword(username, password) {
+  const r = getAdminUser(username);
+  if (!r || !r.password_hash) return { ok: false, mustChange: false };
+  const ok = verifyPassword(password, r.password_hash);
+  return { ok, mustChange: !!r.must_change };
+}
+
+function sha256Hex(s) {
+  return crypto.createHash('sha256').update(String(s)).digest('hex');
+}
+
+/** 创建持久化会话。token 明文仅返回一次，库中只存其哈希。返回 { token, expiresAt } */
+function createAdminSession(username, { userAgent = '', ip = '', ttlMs = config.ADMIN_SESSION_TTL_MS } = {}) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const tokenHash = sha256Hex(token);
+  const now = Date.now();
+  const expiresAt = now + ttlMs;
+  getDb().prepare(
+    'INSERT INTO admin_sessions(token_hash, username, created_at, expires_at, last_seen_at, user_agent, ip) ' +
+    'VALUES(?, ?, ?, ?, ?, ?, ?)'
+  ).run(tokenHash, username || config.ADMIN_USERNAME, now, expiresAt, now, userAgent || '', ip || '');
+  pruneAdminSessions();
+  return { token, expiresAt };
+}
+
+/** 根据 token 校验会话。返回 { username, expiresAt } 或 null。有效时刷新 last_seen。 */
+function getAdminSession(token) {
+  if (!token) return null;
+  const tokenHash = sha256Hex(token);
+  const now = Date.now();
+  const r = getDb().prepare('SELECT * FROM admin_sessions WHERE token_hash = ?').get(tokenHash);
+  if (!r) return null;
+  if (r.expires_at <= now) { deleteAdminSessionByHash(tokenHash); return null; }
+  getDb().prepare('UPDATE admin_sessions SET last_seen_at = ? WHERE token_hash = ?').run(now, tokenHash);
+  return { username: r.username, expiresAt: r.expires_at, createdAt: r.created_at };
+}
+
+/** 续期会话（滑动续期）：把过期时间推迟一个 TTL。 */
+function renewAdminSession(token, ttlMs = config.ADMIN_SESSION_TTL_MS) {
+  if (!token) return null;
+  const tokenHash = sha256Hex(token);
+  const now = Date.now();
+  const r = getDb().prepare('SELECT * FROM admin_sessions WHERE token_hash = ?').get(tokenHash);
+  if (!r) return null;
+  const expiresAt = now + ttlMs;
+  getDb().prepare('UPDATE admin_sessions SET expires_at = ?, last_seen_at = ? WHERE token_hash = ?').run(expiresAt, now, tokenHash);
+  return { username: r.username, expiresAt };
+}
+
+function deleteAdminSessionByHash(tokenHash) {
+  getDb().prepare('DELETE FROM admin_sessions WHERE token_hash = ?').run(tokenHash);
+}
+
+/** 注销单个会话（按 token 明文） */
+function revokeAdminSession(token) {
+  if (!token) return;
+  deleteAdminSessionByHash(sha256Hex(token));
+}
+
+/** 注销某用户名下所有会话 */
+function revokeAllAdminSessions(username) {
+  getDb().prepare('DELETE FROM admin_sessions WHERE username = ?').run(username || config.ADMIN_USERNAME);
+}
+
+/** 清理过期会话 */
+function pruneAdminSessions() {
+  getDb().prepare('DELETE FROM admin_sessions WHERE expires_at <= ?').run(Date.now());
+}
+
+/* ============================ 失败限流（持久化） ============================ */
+
+/**
+ * 持久化限流检查。key 唯一标识限流维度（如 `admin:<ip>|<user>`、`apikey:<ip>`）。
+ * 失败计数有独立窗口；锁定到期时间独立存储，不会因计数窗口滑动被清掉。
+ * 返回 { allowed, retryAfterSec }。
+ */
+function rateLimitCheck(key, { scope = 'admin', maxFails = 8, windowMs = 15 * 60 * 1000, lockMs = 15 * 60 * 1000 } = {}) {
+  const now = Date.now();
+  const d = getDb();
+  let r = d.prepare('SELECT * FROM rate_limits WHERE key = ?').get(key);
+  // 锁定未到期 → 拒绝
+  if (r && r.locked_until > now) {
+    return { allowed: false, retryAfterSec: Math.ceil((r.locked_until - now) / 1000) };
+  }
+  // 计数窗口过期 → 重置计数（但保留锁定判断已在上面处理）
+  if (r && now - r.window_start > windowMs) {
+    d.prepare('UPDATE rate_limits SET fails = 0, window_start = ?, locked_until = 0 WHERE key = ?').run(now, key);
+    r = { key, scope, fails: 0, window_start: now, locked_until: 0 };
+  }
+  if (!r) {
+    d.prepare('INSERT INTO rate_limits(key, scope, fails, window_start, locked_until) VALUES(?, ?, 0, ?, 0)')
+      .run(key, scope, now);
+  }
+  return { allowed: true, retryAfterSec: 0 };
+}
+
+/** 记录一次失败。返回是否触发锁定。 */
+function rateLimitRecordFailure(key, { scope = 'admin', maxFails = 8, windowMs = 15 * 60 * 1000, lockMs = 15 * 60 * 1000 } = {}) {
+  const now = Date.now();
+  const d = getDb();
+  let r = d.prepare('SELECT * FROM rate_limits WHERE key = ?').get(key);
+  if (!r || now - r.window_start > windowMs) {
+    d.prepare(
+      'INSERT INTO rate_limits(key, scope, fails, window_start, locked_until) VALUES(?, ?, 1, ?, 0) ' +
+      'ON CONFLICT(key) DO UPDATE SET fails = 1, window_start = excluded.window_start, locked_until = 0'
+    ).run(key, scope, now);
+    r = d.prepare('SELECT * FROM rate_limits WHERE key = ?').get(key);
+  } else {
+    d.prepare('UPDATE rate_limits SET fails = fails + 1 WHERE key = ?').run(key);
+    r = d.prepare('SELECT * FROM rate_limits WHERE key = ?').get(key);
+  }
+  if (r.fails >= maxFails) {
+    const lockedUntil = now + lockMs;
+    d.prepare('UPDATE rate_limits SET locked_until = ? WHERE key = ?').run(lockedUntil, key);
+    return { locked: true, lockedUntil };
+  }
+  return { locked: false };
+}
+
+/** 成功后清空该 key 的失败计数与锁定 */
+function rateLimitReset(key) {
+  getDb().prepare('DELETE FROM rate_limits WHERE key = ?').run(key);
+}
+
+/** 清理已过期且已解锁的限流记录（避免表无限增长） */
+function pruneRateLimits() {
+  const now = Date.now();
+  getDb().prepare('DELETE FROM rate_limits WHERE locked_until <= ? AND window_start < ?')
+    .run(now, now - 24 * 3600 * 1000);
+}
+
 module.exports = {
   // 账号池（登录态已迁移到 SQLite）
   listAccountRows, getAccountRow, insertAccount, updateAccountRow, deleteAccountRow, accountCount,
@@ -819,4 +1049,13 @@ module.exports = {
 
   // 用量记录
   recordUsage, queryUsage, usageStatsByDay, usageTotals,
+
+  // 管理页鉴权
+  adminAuthEnabled, adminConfigured, getAdminUser, setAdminPassword, verifyAdminPassword,
+  hashPassword, verifyPassword,
+  createAdminSession, getAdminSession, renewAdminSession, revokeAdminSession,
+  revokeAllAdminSessions, pruneAdminSessions,
+
+  // 失败限流（持久化）
+  rateLimitCheck, rateLimitRecordFailure, rateLimitReset, pruneRateLimits,
 };

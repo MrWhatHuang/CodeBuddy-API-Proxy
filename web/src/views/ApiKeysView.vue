@@ -16,6 +16,8 @@ const enabled = computed(() => {
   if (cfg.value) return !!cfg.value.values?.apiKeyEnabled;
   return true;
 });
+// 管理页鉴权开启时，API 密钥校验被强制开启，开关不可关闭
+const adminAuthOn = computed(() => !!cfg.value?.values?.adminAuthEnabled);
 const updatingEnabled = ref(false);
 
 async function toggleEnabled(newVal) {
@@ -130,10 +132,13 @@ function fmtTime(ts) {
       <div class="setting-row" style="margin-top: 14px">
         <div>
           <div class="setting-label">{{ t('apikeys.enable') }}</div>
-          <div class="hint">{{ t('apikeys.enableDesc') }}</div>
+          <div class="hint">
+            {{ t('apikeys.enableDesc') }}
+            <span v-if="adminAuthOn" class="hint-strong">{{ t('settings.apiKeyForcedByAdmin') }}</span>
+          </div>
         </div>
         <label class="switch">
-          <input type="checkbox" :checked="enabled" :disabled="updatingEnabled" @change="toggleEnabled($event.target.checked)" />
+          <input type="checkbox" :checked="adminAuthOn ? true : enabled" :disabled="updatingEnabled || adminAuthOn" @change="toggleEnabled($event.target.checked)" />
           <span class="slider"></span>
         </label>
       </div>
@@ -237,6 +242,7 @@ function fmtTime(ts) {
 <style scoped>
 .head-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
 .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.hint-strong { color: var(--warning); font-weight: 600; display: block; margin-top: 2px; }
 .setting-label { font-weight: 600; font-size: 14px; }
 .table-wrap { overflow-x: auto; }
 .key-cell { font-size: 12px; }

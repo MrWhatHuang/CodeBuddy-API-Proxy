@@ -8,6 +8,7 @@ const logger = require('./logger');
 const util = require('./util');
 const store = require('./store');
 const sessionMod = require('./session');
+const adminAuth = require('./adminAuth');
 
 const pendingLogins = new Map();
 
@@ -267,8 +268,20 @@ function verifyClientKey(req) {
 
   if (!provided) return { ok: false, message: '缺少 API 密钥（请在 Authorization: Bearer 或 X-API-Key 头提供）' };
 
+  // API 密钥爆破限流：按客户端 IP 持久化计数，防止对短自定义密钥无限试错
+  const ip = adminAuth.clientIp(req);
+  const rlKey = 'apikey:' + ip;
+  const rl = store.rateLimitCheck(rlKey, { scope: 'apikey', maxFails: 20, windowMs: 15 * 60 * 1000, lockMs: 15 * 60 * 1000 });
+  if (!rl.allowed) {
+    return { ok: false, message: 'API 密钥校验失败次数过多，请稍后再试', rateLimited: true, retryAfterSec: rl.retryAfterSec };
+  }
+
   const matched = store.resolveApiKey(provided);
-  if (!matched) return { ok: false, message: 'API 密钥无效' };
+  if (!matched) {
+    store.rateLimitRecordFailure(rlKey, { scope: 'apikey', maxFails: 20, windowMs: 15 * 60 * 1000, lockMs: 15 * 60 * 1000 });
+    return { ok: false, message: 'API 密钥无效' };
+  }
+  store.rateLimitReset(rlKey);
   return { ok: true, keyId: matched.id, keyName: matched.name };
 }
 

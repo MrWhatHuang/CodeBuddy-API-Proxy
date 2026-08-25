@@ -10,6 +10,7 @@ const routes = [
   { path: '/usage', name: 'usage', component: () => import('@/views/UsageView.vue'), meta: { title: 'usage' } },
   { path: '/settings', name: 'settings', component: () => import('@/views/SettingsView.vue'), meta: { title: 'settings' } },
   { path: '/login', name: 'login', component: () => import('@/views/LoginView.vue'), meta: { title: 'login' } },
+  { path: '/admin-login', name: 'adminLogin', component: () => import('@/views/AdminLoginView.vue'), meta: { title: 'login' } },
   { path: '/:pathMatch(.*)*', redirect: '/home' },
 ];
 

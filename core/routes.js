@@ -18,6 +18,7 @@ const auth = require('./auth');
 const openai = require('./openai');
 const responses = require('./responses');
 const checkin = require('./checkin');
+const adminAuth = require('./adminAuth');
 
 /* ============================ 状态对象 ============================ */
 
@@ -147,6 +148,99 @@ async function route(req, res) {
   if (method === 'OPTIONS') {
     res.writeHead(204, util.corsHeaders());
     res.end();
+    return;
+  }
+
+  /* ---- 管理页鉴权守卫（开启时拦截所有管理接口/页面） ---- */
+  const guardResult = adminAuth.guard(req, pathname, method);
+  if (guardResult) {
+    if (guardResult.__renew) {
+      // 滑动续期成功，写回刷新后的 Cookie
+      const c = adminAuth.cookieString(config.ADMIN_COOKIE, guardResult.__renew.token, { expiresAt: guardResult.__renew.expiresAt });
+      res.setHeader('Set-Cookie', c);
+    } else {
+      util.sendJson(res, guardResult.status, guardResult.body);
+      return;
+    }
+  }
+
+  /* ---- 管理页鉴权：登录 / 登出 / 状态 / 改密 ---- */
+  if (pathname === '/api/admin/status' && method === 'GET') {
+    const authed = adminAuth.verifySession(req).ok;
+    const resp = {
+      enabled: store.adminAuthEnabled(),
+      configured: store.adminConfigured(),
+      authenticated: authed,
+    };
+    // 仅在已登录时返回用户名，避免向未认证的爆破者泄露账号名
+    if (authed) resp.username = config.ADMIN_USERNAME;
+    util.sendJson(res, 200, resp);
+    return;
+  }
+
+  if (pathname === '/api/admin/login' && method === 'POST') {
+    try {
+      const buf = await util.readBody(req);
+      const body = buf.length ? JSON.parse(buf.toString('utf8')) : {};
+      const username = typeof body.username === 'string' ? body.username.trim() : '';
+      const password = typeof body.password === 'string' ? body.password : '';
+      if (!password) { util.sendJson(res, 400, { error: { message: '密码不能为空' } }); return; }
+      const uname = username || config.ADMIN_USERNAME;
+      const rate = adminAuth.rateCheck(req, uname);
+      if (!rate.allowed) {
+        res.setHeader('Retry-After', String(rate.retryAfterSec));
+        util.sendJson(res, 429, { error: { message: '登录失败次数过多，请稍后再试' } });
+        return;
+      }
+      const v = store.verifyAdminPassword(uname, password);
+      if (!v.ok) {
+        adminAuth.rateRecordFailure(req, uname);
+        logger.log('warn', 'auth', `管理页登录失败: ${uname}`);
+        util.sendJson(res, 401, { error: { message: '用户名或密码错误' } });
+        return;
+      }
+      adminAuth.rateReset(req, uname);
+      const ua = String(req.headers['user-agent'] || '');
+      const ip = adminAuth.clientIp(req);
+      const sess = store.createAdminSession(uname, { userAgent: ua, ip });
+      const cookie = adminAuth.cookieString(config.ADMIN_COOKIE, sess.token, { expiresAt: sess.expiresAt });
+      res.setHeader('Set-Cookie', cookie);
+      logger.log('info', 'auth', `管理页登录成功: ${uname}`);
+      util.sendJson(res, 200, { ok: true, mustChange: v.mustChange, expiresAt: sess.expiresAt });
+    } catch (e) {
+      util.sendJson(res, 400, { error: { message: `登录失败: ${e.message}` } });
+    }
+    return;
+  }
+
+  if (pathname === '/api/admin/logout' && (method === 'POST' || method === 'GET')) {
+    const token = adminAuth.extractToken(req);
+    if (token) store.revokeAdminSession(token);
+    const cookie = adminAuth.cookieString(config.ADMIN_COOKIE, '', { expiresAt: 0 });
+    res.setHeader('Set-Cookie', cookie);
+    logger.log('info', 'auth', '管理页已退出登录');
+    util.sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (pathname === '/api/admin/change-password' && method === 'POST') {
+    const v = adminAuth.verifySession(req);
+    if (!v.ok) { util.sendJson(res, 401, { error: { message: '未登录或会话已失效', type: 'admin_auth_required' } }); return; }
+    try {
+      const buf = await util.readBody(req);
+      const body = buf.length ? JSON.parse(buf.toString('utf8')) : {};
+      const current = typeof body.currentPassword === 'string' ? body.currentPassword : '';
+      const next = typeof body.newPassword === 'string' ? body.newPassword : '';
+      if (!next || next.length < 8) { util.sendJson(res, 400, { error: { message: '新密码至少 8 位' } }); return; }
+      if (!/[A-Za-z]/.test(next) || !/[0-9]/.test(next)) { util.sendJson(res, 400, { error: { message: '新密码需同时包含字母和数字' } }); return; }
+      const cur = store.verifyAdminPassword(v.username, current);
+      if (!cur.ok) { util.sendJson(res, 400, { error: { message: '当前密码错误' } }); return; }
+      store.setAdminPassword(v.username, next, { mustChange: false });
+      logger.log('info', 'auth', `管理页密码已修改: ${v.username}`);
+      util.sendJson(res, 200, { ok: true });
+    } catch (e) {
+      util.sendJson(res, 400, { error: { message: `修改失败: ${e.message}` } });
+    }
     return;
   }
 
@@ -463,7 +557,7 @@ async function route(req, res) {
   /* ---- 模型列表（内置 + 自定义合并） ---- */
   if (pathname === '/v1/models') {
     const keyCheck = auth.verifyClientKey(req);
-    if (!keyCheck.ok) { util.sendJson(res, 401, { error: { message: keyCheck.message, type: 'authentication_error' } }); return; }
+    if (!keyCheck.ok) { util.sendJson(res, keyCheck.rateLimited ? 429 : 401, { error: { message: keyCheck.message, type: 'authentication_error' } }); return; }
     util.sendJson(res, 200, models.modelsResponse(store.listModels()));
     return;
   }
@@ -471,7 +565,7 @@ async function route(req, res) {
     const accept = String(req.headers.accept || '');
     if (accept.includes('text/html')) { serveIndex(res); return; }
     const keyCheck = auth.verifyClientKey(req);
-    if (!keyCheck.ok) { util.sendJson(res, 401, { error: { message: keyCheck.message, type: 'authentication_error' } }); return; }
+    if (!keyCheck.ok) { util.sendJson(res, keyCheck.rateLimited ? 429 : 401, { error: { message: keyCheck.message, type: 'authentication_error' } }); return; }
     util.sendJson(res, 200, models.modelsResponse(store.listModels()));
     return;
   }

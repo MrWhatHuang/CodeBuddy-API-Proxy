@@ -22,6 +22,7 @@ const form = reactive({
   requestTimeoutSec: 300,
   corsOrigin: '*',
   apiKeyEnabled: true,
+  adminAuthEnabled: false,
 });
 
 watch(cfg, (c) => {
@@ -37,6 +38,7 @@ watch(cfg, (c) => {
   form.requestTimeoutSec = Math.round((c.values.requestTimeoutMs || 300000) / 1000);
   form.corsOrigin = c.values.corsOrigin || '*';
   form.apiKeyEnabled = c.values.apiKeyEnabled !== false;
+  form.adminAuthEnabled = c.values.adminAuthEnabled === true;
 }, { immediate: true });
 
 const saving = ref(false);
@@ -60,8 +62,13 @@ async function save() {
       requestTimeoutMs: Number(form.requestTimeoutSec) * 1000,
       corsOrigin: form.corsOrigin.trim() || '*',
       apiKeyEnabled: form.apiKeyEnabled,
+      adminAuthEnabled: form.adminAuthEnabled,
     };
     await api.saveConfig(patch);
+    if (patch.adminAuthEnabled) {
+      window.location.href = '/admin-login';
+      return;
+    }
     await reload();
     saved.value = true;
     setTimeout(() => { saved.value = false; }, 2000);
@@ -84,11 +91,48 @@ function resetForm() {
   form.requestTimeoutSec = 300;
   form.corsOrigin = '*';
   form.apiKeyEnabled = true;
+  form.adminAuthEnabled = false;
 }
 
 function onLocaleChange(v) {
   locale.value = v;
   setLocale(v);
+}
+
+/* ---- 管理页鉴权：改密 / 退出 ---- */
+const showPwd = ref(false);
+const pwdLoading = ref(false);
+const pwdError = ref('');
+const pwdForm = reactive({ current: '', next: '', confirm: '' });
+
+function openPwd() {
+  pwdError.value = '';
+  pwdForm.current = '';
+  pwdForm.next = '';
+  pwdForm.confirm = '';
+  showPwd.value = true;
+}
+
+async function submitPwd() {
+  if (!pwdForm.next || pwdForm.next.length < 8) { pwdError.value = t('admin.login.pwTooShort'); return; }
+  if (!/[A-Za-z]/.test(pwdForm.next) || !/[0-9]/.test(pwdForm.next)) { pwdError.value = t('admin.login.pwComplexity'); return; }
+  if (pwdForm.next !== pwdForm.confirm) { pwdError.value = t('admin.login.pwMismatch'); return; }
+  pwdLoading.value = true;
+  pwdError.value = '';
+  try {
+    await api.adminChangePassword({ currentPassword: pwdForm.current, newPassword: pwdForm.next });
+    showPwd.value = false;
+    alert(t('admin.login.changed'));
+  } catch (e) {
+    pwdError.value = e.message || String(e);
+  } finally {
+    pwdLoading.value = false;
+  }
+}
+
+async function doAdminLogout() {
+  try { await api.adminLogout(); } catch { /* ignore */ }
+  window.location.href = '/admin-login';
 }
 
 const levels = ['debug', 'info', 'warn', 'error'];
@@ -208,6 +252,29 @@ const levels = ['debug', 'info', 'warn', 'error'];
       </div>
 
       <div class="card">
+        <h2 class="card-title">{{ t('admin.title') }}</h2>
+        <p class="hint" style="margin-top: -8px">{{ t('admin.desc') }}</p>
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">{{ t('admin.enable') }}</div>
+            <div class="hint">{{ t('admin.enableDesc') }}</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" v-model="form.adminAuthEnabled" />
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="divider"></div>
+        <div class="hint" style="margin-bottom: 12px">
+          {{ t('admin.usernameLabel') }} <code>{{ cfg.values.adminUsername }}</code>
+        </div>
+        <div class="actions-row">
+          <button class="btn btn-ghost" @click="openPwd">{{ t('admin.changePassword') }}</button>
+          <button class="btn btn-danger" @click="doAdminLogout">{{ t('admin.logout') }}</button>
+        </div>
+      </div>
+
+      <div class="card">
         <h2 class="card-title">{{ t('settings.proxy') }}</h2>
         <p class="hint" style="margin-top: -8px">{{ t('settings.proxyDesc') }}</p>
         <div class="grid">
@@ -266,6 +333,32 @@ const levels = ['debug', 'info', 'warn', 'error'];
         </div>
       </div>
     </template>
+
+    <!-- 修改管理员密码弹窗 -->
+    <div v-if="showPwd" class="modal-mask" @click.self="showPwd = false">
+      <div class="modal">
+        <h3 class="modal-title">{{ t('admin.changePassword') }}</h3>
+        <div class="field">
+          <label>{{ t('admin.currentPassword') }}</label>
+          <input v-model="pwdForm.current" type="password" class="input" autocomplete="current-password" />
+        </div>
+        <div class="field">
+          <label>{{ t('admin.newPassword') }}</label>
+          <input v-model="pwdForm.next" type="password" class="input" autocomplete="new-password" />
+        </div>
+        <div class="field">
+          <label>{{ t('admin.confirmPassword') }}</label>
+          <input v-model="pwdForm.confirm" type="password" class="input" autocomplete="new-password" />
+        </div>
+        <div v-if="pwdError" class="form-error">{{ pwdError }}</div>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" @click="showPwd = false">{{ t('common.cancel') }}</button>
+          <button class="btn btn-primary" :disabled="pwdLoading" @click="submitPwd">
+            {{ pwdLoading ? t('common.saving') : t('common.save') }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -298,4 +391,14 @@ const levels = ['debug', 'info', 'warn', 'error'];
 }
 .kv-item .k { display: block; font-size: 12px; color: var(--text-2); }
 .kv-item .v { font-size: 13px; font-weight: 600; word-break: break-all; }
+.actions-row { display: flex; gap: 10px; }
+.btn-danger { color: var(--danger); border-color: var(--danger-soft); }
+.btn-danger:hover:not(:disabled) { background: var(--danger-soft); }
+.modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 50; }
+.modal { width: 400px; max-width: 92vw; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 22px 24px; box-shadow: 0 20px 60px rgba(0,0,0,0.35); }
+.modal-title { margin: 0 0 16px; font-size: 17px; }
+.modal .field { margin-bottom: 14px; }
+.modal .field label { display: block; font-size: 13px; color: var(--text-2); margin-bottom: 6px; }
+.form-error { color: var(--danger); font-size: 13px; margin: 8px 0; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
 </style>

@@ -79,7 +79,8 @@ async function handleProxy(req, res, pathname) {
 
   const keyCheck = auth.verifyClientKey(req);
   if (!keyCheck.ok) {
-    util.sendJson(res, 401, { error: { message: keyCheck.message, type: 'authentication_error' } });
+    const status = keyCheck.rateLimited ? 429 : 401;
+    util.sendJson(res, status, { error: { message: keyCheck.message, type: 'authentication_error' } });
     return true;
   }
 

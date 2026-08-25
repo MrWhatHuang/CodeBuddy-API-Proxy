@@ -153,6 +153,9 @@ codex exec "你的任务"
 | `CODEBUDDY_DEFAULT_MODEL` | `default` | 缺省 model |
 | `CODEBUDDY_API_KEY` | 空 | 兼容旧版：指定单个 API 密钥（首次启动时迁移进 API 密钥表）。也可在管理页「API 密钥」里管理多个密钥 |
 | `CODEBUDDY_NO_OPEN` | 空 | 设置则不自动打开管理页 |
+| `CODEBUDDY_ADMIN_USERNAME` | `admin` | 管理页鉴权的管理员用户名 |
+| `CODEBUDDY_ADMIN_PASSWORD` | 空 | 管理页鉴权初始密码。首次启动时写入并强制首次登录改密；为空则自动生成一次性随机密码并打印到启动日志 |
+| `CODEBUDDY_TRUST_PROXY` | 空（关闭） | 设为 `true` / `1` 才信任反向代理（Cloudflare / nginx）注入的 `X-Forwarded-For`。**未设置时不信任**，限流按直连 IP 计算，防止伪造 XFF 绕过限流 |
 | `CODEBUDDY_DEBUG` | 空 | 把最近一次 Responses 请求 dump 到 `/tmp/codebuddy-debug-last.json` |
 
 国际版可设 `CODEBUDDY_ENDPOINT=https://www.codebuddy.ai`。
@@ -195,6 +198,7 @@ curl -X PUT http://127.0.0.1:3800/api/config -H "Content-Type: application/json"
 | `corsOrigin` | `*` | `Access-Control-Allow-Origin` |
 | `apiKeyEnabled` | `true` | 是否校验客户端访问 `/v1` 与 `/responses` 所需的 API 密钥 |
 | `apiKey` | 空 | 兼容旧版：加入一个密钥到密钥表；不影响校验开关 |
+| `adminAuthEnabled` | `false` | 是否开启管理页/管理接口鉴权（登录后访问） |
 
 日志查询：
 
@@ -203,6 +207,51 @@ curl "http://127.0.0.1:3800/api/logs?level=info&category=proxy&q=chat&limit=50&o
 ```
 
 支持 `level`、`category`（`system` / `auth` / `proxy` / `responses` / `config`）、`q`、`from`、`to`（毫秒时间戳）、`limit`（1–1000）、`offset`。
+
+## 管理页鉴权
+
+部署到公网/服务器时，建议开启管理页鉴权（默认关闭，向后兼容）。开启后访问管理页及所有管理接口都需登录，**AI 对话接口（`/v1/*`、`/responses`）不受影响**，仍只校验 API 密钥。
+
+- 在管理页「系统配置」里打开「管理页鉴权」开关即可启用。保存后请打开 [`/admin-login`](http://127.0.0.1:3800/admin-login) 登录。
+- 管理员账号默认 `admin`；初始密码来自环境变量 `CODEBUDDY_ADMIN_PASSWORD`，或首次启动时自动生成并打印到启动日志（一次性，搜 `[重要] 管理页初始密码`）。
+- 首次登录后建议在「系统配置」里「修改密码」。
+- 若已开启鉴权却不知道密码：把 `CODEBUDDY_ADMIN_PASSWORD` 设成新密码后删除数据库里的管理员记录再重启（见下方「忘记密码」），或临时把配置里的 `adminAuthEnabled` 改回 `false`。
+- 密码用 scrypt（随机盐）哈希存储，新密码要求至少 8 位且同时包含字母和数字。
+- 登录失败按 IP+用户名限流（15 分钟窗口内 8 次失败后锁定），**持久化到 SQLite（服务重启后仍锁定）**，锁定到期时间独立存储不因窗口滑动被清掉。
+- 客户端 IP 仅在设置 `CODEBUDDY_TRUST_PROXY=true` 时信任 `X-Forwarded-For`，否则用直连 IP，防止伪造 XFF 绕过限流。
+- 登录会话持久化到 SQLite（服务重启后仍有效），通过 HttpOnly + SameSite=Strict Cookie 下发，也支持 `Authorization: Bearer <token>` 供脚本调用。
+- 自定义 API 密钥最短 16 位；API 密钥校验同样有失败限流（按 IP 持久化，20 次失败后锁定）。
+
+相关接口：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/admin/login` | 登录，body `{ username, password }` |
+| POST | `/api/admin/logout` | 退出登录（注销当前会话） |
+| POST | `/api/admin/change-password` | 修改密码，body `{ currentPassword, newPassword }` |
+| GET | `/api/admin/status` | 鉴权状态（是否开启 / 是否已登录） |
+
+浏览器打开 `http://127.0.0.1:3800/admin-login`，用户名默认 `admin`，密码用启动日志里的初始密码。也可用 curl：
+
+```bash
+curl -c /tmp/cbp-admin.cookie -X POST http://127.0.0.1:3800/api/admin/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"你的密码"}'
+# 之后带 cookie 访问管理接口
+curl -b /tmp/cbp-admin.cookie http://127.0.0.1:3800/api/config
+```
+
+### 忘记密码
+
+初始密码只在**第一次启动**时打印。之后可用 sqlite 关掉鉴权或重置管理员：
+
+```bash
+# 临时关闭鉴权（然后重启，进入管理页改密后再打开）
+sqlite3 ~/.codebuddy-proxy/proxy.db "UPDATE config SET value='false' WHERE key='adminAuthEnabled';"
+
+# 或删除管理员记录后重启，会重新生成初始密码并打印到启动日志
+sqlite3 ~/.codebuddy-proxy/proxy.db "DELETE FROM admin_users; DELETE FROM admin_sessions;"
+```
 
 ## 接口
 
