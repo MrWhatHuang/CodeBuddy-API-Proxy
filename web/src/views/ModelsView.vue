@@ -79,6 +79,23 @@ async function remove(m) {
     alert(`${t('models.deleteError')}: ${e.message}`);
   }
 }
+
+const togglingHidden = ref(new Set());
+async function toggleHidden(m) {
+  togglingHidden.value = new Set([...togglingHidden.value, m.id]);
+  try {
+    await api.setModelHidden(m.id, !m.hidden);
+    await reloadModels();
+    await reload();
+  } catch (e) {
+    alert(t('models.hideError') + ': ' + e.message);
+    await reloadModels();
+  } finally {
+    const s = new Set(togglingHidden.value);
+    s.delete(m.id);
+    togglingHidden.value = s;
+  }
+}
 </script>
 
 <template>
@@ -116,6 +133,7 @@ async function remove(m) {
                 <span class="badge" :class="m.region === 'intl' ? 'badge-warning' : 'badge-neutral'">
                   {{ m.region === 'intl' ? t('models.intl') : t('models.cn') }}
                 </span>
+                <span v-if="m.hidden" class="badge badge-warning">{{ t('models.hidden') }}</span>
               </td>
               <td>{{ m.name }}</td>
               <td class="mono muted">{{ m.maxInputTokens ? Math.round(m.maxInputTokens / 1000) + 'k' : '—' }}</td>
@@ -132,6 +150,9 @@ async function remove(m) {
                 </span>
               </td>
               <td class="actions">
+                <button class="btn btn-ghost btn-sm" :disabled="togglingHidden.has(m.id)" @click="toggleHidden(m)">
+                  {{ m.hidden ? t('models.show') : t('models.hide') }}
+                </button>
                 <button class="btn btn-ghost btn-sm" :disabled="m.builtin !== false" @click="openEdit(m)">{{ t('common.edit') }}</button>
                 <button class="btn btn-danger btn-sm" :disabled="m.builtin !== false" @click="remove(m)">{{ t('common.delete') }}</button>
               </td>

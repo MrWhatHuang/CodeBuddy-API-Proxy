@@ -122,6 +122,10 @@ export default {
     region: '区域',
     confirmDelete: '确认删除模型',
     deleteError: '删除失败',
+    hidden: '已隐藏',
+    hide: '隐藏',
+    show: '显示',
+    hideError: '更新隐藏状态失败',
   },
   logs: {
     title: '系统日志',
@@ -242,7 +246,7 @@ export default {
     deleteConfirm: '确认删除该密钥？删除后立即失效',
     deleteError: '删除失败',
     empty: '还没有 API 密钥，点击「新增密钥」创建第一个',
-    copiedHint: '请复制并妥善保存，密钥仅在创建时完整显示一次',
+    copiedHint: '可随时在此页面查看并复制完整密钥',
     generated: '新密钥已生成',
   },
   usage: {

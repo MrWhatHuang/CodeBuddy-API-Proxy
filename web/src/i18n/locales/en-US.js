@@ -122,6 +122,10 @@ export default {
     region: 'Region',
     confirmDelete: 'Delete this model?',
     deleteError: 'Failed to delete',
+    hidden: 'Hidden',
+    hide: 'Hide',
+    show: 'Show',
+    hideError: 'Failed to update visibility',
   },
   logs: {
     title: 'System logs',
@@ -242,7 +246,7 @@ export default {
     deleteConfirm: 'Delete this key? It will stop working immediately',
     deleteError: 'Failed to delete',
     empty: 'No API keys yet. Click "Add key" to create the first one',
-    copiedHint: 'Copy and save it now — the key is shown in full only once',
+    copiedHint: 'You can view and copy the full key here at any time',
     generated: 'New key generated',
   },
   usage: {

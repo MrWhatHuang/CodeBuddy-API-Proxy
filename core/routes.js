@@ -66,7 +66,7 @@ function statusObject() {
       expiresAt: active.auth.expiresAt || 0,
       expiresInSeconds: active.auth.expiresAt ? Math.round((active.auth.expiresAt - Date.now()) / 1000) : 0,
     } : null,
-    models: models.allModels(store.listModels()),
+    models: models.allModels(store.listModels(), store.getHiddenModels()),
   };
 }
 
@@ -89,7 +89,7 @@ function configResponse() {
     options: {
       levels: config.LOG_LEVELS,
       categories: config.LOG_CATEGORIES,
-      models: models.allModels(store.listModels()).map((m) => ({ id: m.id, name: m.name })),
+      models: models.allModels(store.listModels(), store.getHiddenModels()).map((m) => ({ id: m.id, name: m.name, hidden: !!m.hidden })),
     },
   };
 }
@@ -602,7 +602,7 @@ async function route(req, res) {
 
   /* ---- 自定义模型管理 API ---- */
   if (pathname === '/api/models' && method === 'GET') {
-    util.sendJson(res, 200, { models: models.allModels(store.listModels()) });
+    util.sendJson(res, 200, { models: models.allModels(store.listModels(), store.getHiddenModels()) });
     return;
   }
   if (pathname === '/api/models' && method === 'POST') {
@@ -625,6 +625,21 @@ async function route(req, res) {
     if (!r.deleted) { util.sendJson(res, 404, { error: { message: '未找到该模型' } }); return; }
     logger.log('info', 'config', `删除自定义模型: ${id}`);
     util.sendJson(res, 200, { ok: true, id });
+    return;
+  }
+  if (pathname.startsWith('/api/models/') && method === 'PUT' && pathname.endsWith('/hidden')) {
+    const id = decodeURIComponent(pathname.slice('/api/models/'.length, -'/hidden'.length));
+    try {
+      const buf = await util.readBody(req);
+      const body = buf.length ? JSON.parse(buf.toString('utf8')) : {};
+      const hidden = body && (body.hidden === true || body.hidden === 'true' || body.hidden === 1 || body.hidden === '1');
+      const r = store.setModelHidden(id, hidden);
+      if (r.error) { util.sendJson(res, 400, { error: { message: r.error } }); return; }
+      logger.log('info', 'config', (hidden ? '隐藏模型: ' : '显示模型: ') + id);
+      util.sendJson(res, 200, { ok: true, id, hidden });
+    } catch (e) {
+      util.sendJson(res, 400, { error: { message: '更新模型隐藏状态失败: ' + e.message } });
+    }
     return;
   }
 

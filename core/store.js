@@ -433,6 +433,26 @@ function getModel(id) {
   };
 }
 
+/* ---- 模型隐藏（内置与自定义模型均支持） ---- */
+
+/** 读取被隐藏的模型 id 集合（存于 config 表 hiddenModels，JSON 数组）。 */
+function getHiddenModels() {
+  const raw = getConfig()['hiddenModels'];
+  const arr = safeParseJson(raw, []);
+  return Array.isArray(arr) ? arr.filter((x) => typeof x === 'string' && x) : [];
+}
+
+/** 设置某个模型是否隐藏。返回最新的隐藏 id 数组。 */
+function setModelHidden(id, hidden) {
+  if (!id) return { error: 'model id 不能为空' };
+  const set = new Set(getHiddenModels());
+  if (hidden) set.add(id);
+  else set.delete(id);
+  const next = Array.from(set);
+  setConfig({ hiddenModels: JSON.stringify(next) });
+  return { hidden: next };
+}
+
 /* ============================ API 密钥 ============================ */
 
 const crypto = require('crypto');
@@ -477,9 +497,9 @@ function listApiKeys() {
   }));
 }
 
-/** 公开给管理页：不返回完整密钥 */
+/** 公开给管理页：返回完整密钥（fullKey），管理页可随时查看/复制 */
 function listApiKeysPublic() {
-  return listApiKeys().map((k) => ({ ...k, fullKey: undefined, key: k.key }));
+  return listApiKeys().map((k) => ({ ...k, key: k.fullKey, fullKey: k.fullKey }));
 }
 
 function getApiKey(id) {
@@ -1058,6 +1078,7 @@ module.exports = {
 
   // 自定义模型
   addModel, listModels, removeModel, getModel,
+  getHiddenModels, setModelHidden,
 
   getConfig, setConfig, publicValues, applyPublicPatch,
   getRequestTimeoutMs, getCorsOrigin, loggingDetailsEnabled,

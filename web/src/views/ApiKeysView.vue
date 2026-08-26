@@ -108,14 +108,10 @@ async function copyKey(k) {
 async function regenerate(k) {
   if (!confirm(t('apikeys.regenerateConfirm'))) return;
   try {
-    const r = await api.regenerateKey(k.id);
-    const fullKey = r.key?.fullKey || k.key;
+    await api.regenerateKey(k.id);
     await reload();
     // 重新加载后，把刚生成的密钥展开显示
     revealed.value = new Set([k.id]);
-    const arr = keyData.value?.keys || [];
-    const idx = arr.findIndex((x) => x.id === k.id);
-    if (idx >= 0) arr[idx] = { ...arr[idx], key: fullKey };
     alert(t('apikeys.generated'));
   } catch (e) {
     alert(`${t('apikeys.deleteError')}: ${e.message}`);
