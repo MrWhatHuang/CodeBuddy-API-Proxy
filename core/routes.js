@@ -40,6 +40,7 @@ function accountPublic(acct) {
     expiresAt: au.expiresAt || 0,
     expiresInSeconds: au.expiresAt ? Math.round((au.expiresAt - Date.now()) / 1000) : 0,
     hasToken: !!au.accessToken,
+    autoCheckin: acct.autoCheckin === undefined ? true : !!acct.autoCheckin,
     lastUsedAt: acct.lastUsedAt || 0,
     useCount: acct.useCount || 0,
     createdAt: acct.createdAt || 0,
@@ -522,13 +523,20 @@ async function route(req, res) {
     try {
       const buf = await util.readBody(req);
       const body = buf.length ? JSON.parse(buf.toString('utf8')) : {};
-      if (typeof body.name !== 'string' || !body.name.trim()) { util.sendJson(res, 400, { error: { message: 'name 不能为空' } }); return; }
-      const acct = sessionMod.updateAccount(id, { name: body.name });
+      const patch = {};
+      if (body.name !== undefined) {
+        if (typeof body.name !== 'string' || !body.name.trim()) { util.sendJson(res, 400, { error: { message: 'name 不能为空' } }); return; }
+        patch.name = body.name;
+      }
+      if (body.autoCheckin !== undefined) patch.autoCheckin = body.autoCheckin === true || body.autoCheckin === 'true' || body.autoCheckin === 1 || body.autoCheckin === '1';
+      if (!Object.keys(patch).length) { util.sendJson(res, 400, { error: { message: '没有可更新的字段' } }); return; }
+      const acct = sessionMod.updateAccount(id, patch);
       if (!acct) { util.sendJson(res, 404, { error: { message: '未找到该账号' } }); return; }
-      logger.log('info', 'config', '账号已重命名: ' + acct.name);
+      if (patch.name) logger.log('info', 'config', '账号已重命名: ' + acct.name);
+      if (patch.autoCheckin !== undefined) logger.log('info', 'config', '账号自动签到已' + (patch.autoCheckin ? '开启' : '关闭') + ': ' + acct.name);
       util.sendJson(res, 200, accountPublic(acct));
     } catch (e) {
-      util.sendJson(res, 400, { error: { message: '重命名失败: ' + e.message } });
+      util.sendJson(res, 400, { error: { message: '更新账号失败: ' + e.message } });
     }
     return;
   }

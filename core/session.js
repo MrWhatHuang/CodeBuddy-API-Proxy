@@ -64,6 +64,7 @@ function normalizePoolAccount(acct) {
     account: n.account,
     auth: n.auth,
     accounts: n.accounts,
+    autoCheckin: acct.autoCheckin === undefined ? true : !!acct.autoCheckin,
     lastUsedAt: acct.lastUsedAt || 0,
     useCount: acct.useCount || 0,
     createdAt: acct.createdAt || Date.now(),
@@ -121,6 +122,7 @@ function loadFromDb() {
       account: r.account,
       auth: r.auth,
       accounts: r.accounts,
+      autoCheckin: r.autoCheckin === undefined ? true : !!r.autoCheckin,
       lastUsedAt: r.lastUsedAt,
       useCount: r.useCount,
       createdAt: r.createdAt,
@@ -210,6 +212,7 @@ function persistPool() {
         account: acct.account,
         auth: acct.auth,
         accounts: acct.accounts,
+        autoCheckin: acct.autoCheckin === undefined ? true : !!acct.autoCheckin,
         lastUsedAt: acct.lastUsedAt,
         useCount: acct.useCount,
         createdAt: acct.createdAt,
@@ -276,6 +279,7 @@ function updateAccount(id, patch) {
     if (typeof patch.name === 'string' && patch.name.trim()) acct.name = patch.name.trim();
     if (patch.auth && typeof patch.auth === 'object') acct.auth = normalizeSession({ account: acct.account, auth: patch.auth }).auth;
     if (patch.account && typeof patch.account === 'object') acct.account = Object.assign({}, acct.account, patch.account);
+    if (patch.autoCheckin !== undefined) acct.autoCheckin = !!patch.autoCheckin;
     if (patch.lastUsedAt != null) acct.lastUsedAt = patch.lastUsedAt;
     if (patch.useCount != null) acct.useCount = patch.useCount;
     if (patch.source) acct.source = patch.source;
@@ -291,7 +295,10 @@ function removeAccount(id) {
   state.accounts = state.accounts.filter(function (a) { return a.id !== id; });
   if (state.pool && state.pool.pinnedId === id) state.pool.pinnedId = null;
   const removed = state.accounts.length < before;
-  if (removed) persistPool();
+  if (removed) {
+    persistPool();
+    try { store.deleteCheckinState(id); } catch (e) { /* ignore */ }
+  }
   return removed;
 }
 

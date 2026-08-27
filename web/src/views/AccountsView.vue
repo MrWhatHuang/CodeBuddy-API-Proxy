@@ -241,6 +241,17 @@ function pollLogin(state) {
   }, 2000);
 }
 
+async function toggleAutoCheckin(acct) {
+  const next = !(acct.autoCheckin !== false);
+  try {
+    await api.setAccountAutoCheckin(acct.id, next);
+    acct.autoCheckin = next;
+    notice.value = next ? t('accounts.autoCheckinOn') : t('accounts.autoCheckinOff');
+  } catch (e) {
+    notice.value = t('common.error') + ': ' + e.message;
+  }
+}
+
 async function rename(acct) {
   const name = prompt(t('accounts.renamePrompt'), acct.name);
   if (name == null) return;
@@ -358,6 +369,10 @@ load();
                   <span class="checkin-state" :class="checkinState(a).kind">{{ checkinState(a).text }}</span>
                 </template>
                 <span v-else class="muted">{{ checkinLoading ? t('common.loading') : '-' }}</span>
+                <label class="auto-checkin">
+                  <input type="checkbox" :checked="a.autoCheckin !== false" @change="toggleAutoCheckin(a)" />
+                  <span>{{ t('accounts.autoCheckin') }}</span>
+                </label>
               </td>
               <td class="ops">
                 <button class="btn btn-ghost btn-sm" :disabled="!!checkingId" @click="doCheckin(a)">{{ checkingId === a.id ? t('accounts.checkinDoing') : t('accounts.checkin') }}</button>
@@ -443,6 +458,8 @@ tr.pinned td { background: var(--primary-soft); }
 .strong { font-weight: 600; }
 .ops { display: flex; gap: 6px; justify-content: flex-end; white-space: nowrap; }
 .checkin-state { font-size: 12px; font-weight: 600; white-space: nowrap; }
+.auto-checkin { display: flex; align-items: center; gap: 5px; margin-top: 6px; font-size: 12px; color: var(--text-2); cursor: pointer; white-space: nowrap; }
+.auto-checkin input { margin: 0; }
 .checkin-state.done { color: var(--success, #3fb950); }
 .checkin-state.todo { color: var(--warning, #d29922); }
 .checkin-state.off { color: var(--text-2); }

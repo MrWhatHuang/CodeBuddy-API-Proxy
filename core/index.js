@@ -13,6 +13,7 @@ const util = require('./util');
 const sessionMod = require('./session');
 const vscode = require('./vscode');
 const routes = require('./routes');
+const checkinScheduler = require('./checkinScheduler');
 
 function openBrowser(url) {
   try {
@@ -46,6 +47,9 @@ function start() {
     const session = sessionMod.getSession();
     const cfg = store.getConfig();
     store.ensureDefaultApiKey();
+
+    // 自动每日签到调度器（对开启自动签到的账号，每天随机时间签到）
+    checkinScheduler.start();
 
     // 管理页鉴权：首次启动时初始化管理员密码（优先环境变量，否则生成一次性初始密码）
     let adminInitialPassword = '';

@@ -99,12 +99,21 @@ function getDb() {
       account       TEXT NOT NULL DEFAULT '{}',    -- JSON：{ uid, nickname, type, enterpriseId, ... }
       auth          TEXT NOT NULL DEFAULT '{}',    -- JSON：{ accessToken, refreshToken, domain, expiresAt, ... }
       accounts      TEXT NOT NULL DEFAULT '[]',    -- JSON：该账号可切换的子账号列表
+      auto_checkin  INTEGER NOT NULL DEFAULT 1,    -- 是否开启自动每日签到（0/1，默认开启）
       last_used_at  INTEGER NOT NULL DEFAULT 0,
       use_count     INTEGER NOT NULL DEFAULT 0,
       created_at    INTEGER NOT NULL,
       updated_at    INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_accounts_source ON accounts(source);
+
+    -- 自动每日签到状态（按账号），用于记录上次签到日期与下次随机签到时间
+    CREATE TABLE IF NOT EXISTS checkin_state (
+      account_id  TEXT PRIMARY KEY,
+      last_date   TEXT NOT NULL DEFAULT '',   -- 'YYYY-MM-DD'，上次签到完成的本地日期
+      next_at     INTEGER NOT NULL DEFAULT 0, -- 下次随机签到时间（毫秒时间戳）
+      updated_at  INTEGER NOT NULL DEFAULT 0
+    );
 
     -- 账号池配置（单行：version=2 固定），mode/strategy/pinnedId/cursor 存为 JSON
     CREATE TABLE IF NOT EXISTS account_pool (
@@ -157,6 +166,13 @@ function getDb() {
     const cols = db.prepare("PRAGMA table_info(api_keys)").all().map((c) => c.name);
     if (!cols.includes('account_id')) {
       db.exec("ALTER TABLE api_keys ADD COLUMN account_id TEXT NOT NULL DEFAULT ''");
+    }
+  } catch { /* 表不存在或已就绪则忽略 */ }
+  // 兼容旧库：若 accounts 表缺少 auto_checkin 列则补充（默认开启）
+  try {
+    const cols = db.prepare("PRAGMA table_info(accounts)").all().map((c) => c.name);
+    if (!cols.includes('auto_checkin')) {
+      db.exec("ALTER TABLE accounts ADD COLUMN auto_checkin INTEGER NOT NULL DEFAULT 1");
     }
   } catch { /* 表不存在或已就绪则忽略 */ }
   return db;
@@ -778,6 +794,7 @@ function accountRowToObject(r) {
     account: safeParseJson(r.account, {}),
     auth: safeParseJson(r.auth, {}),
     accounts: safeParseJson(r.accounts, []),
+    autoCheckin: r.auto_checkin === undefined ? true : !!r.auto_checkin,
     lastUsedAt: r.last_used_at || 0,
     useCount: r.use_count || 0,
     createdAt: r.created_at || 0,
@@ -810,18 +827,20 @@ function insertAccount(acct) {
   const account = acct.account || {};
   const auth = acct.auth || {};
   const accounts = Array.isArray(acct.accounts) ? acct.accounts : [];
+  const autoCheckin = acct.autoCheckin === undefined ? true : !!acct.autoCheckin;
   const createdAt = Number(acct.createdAt) || Date.now();
   const now = Date.now();
   getDb().prepare(
-    'INSERT INTO accounts(id, name, source, added_by, account, auth, accounts, last_used_at, use_count, created_at, updated_at) ' +
-    'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+    'INSERT INTO accounts(id, name, source, added_by, account, auth, accounts, auto_checkin, last_used_at, use_count, created_at, updated_at) ' +
+    'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
     'ON CONFLICT(id) DO UPDATE SET ' +
     'name=excluded.name, source=excluded.source, added_by=excluded.added_by, ' +
-    'account=excluded.account, auth=excluded.auth, accounts=excluded.accounts, ' +
+    'account=excluded.account, auth=excluded.auth, accounts=excluded.accounts, auto_checkin=excluded.auto_checkin, ' +
     'last_used_at=excluded.last_used_at, use_count=excluded.use_count, updated_at=excluded.updated_at'
   ).run(
     id, name, source, addedBy,
     JSON.stringify(account), JSON.stringify(auth), JSON.stringify(accounts),
+    autoCheckin ? 1 : 0,
     Number(acct.lastUsedAt) || 0, Number(acct.useCount) || 0, createdAt, now
   );
   return getAccountRow(id);
@@ -834,7 +853,7 @@ function updateAccountRow(id, patch) {
   if (!existing) return null;
   const next = Object.assign({}, existing, patch);
   getDb().prepare(
-    'UPDATE accounts SET name=?, source=?, added_by=?, account=?, auth=?, accounts=?, last_used_at=?, use_count=?, updated_at=? WHERE id=?'
+    'UPDATE accounts SET name=?, source=?, added_by=?, account=?, auth=?, accounts=?, auto_checkin=?, last_used_at=?, use_count=?, updated_at=? WHERE id=?'
   ).run(
     String(next.name || ''),
     String(next.source || 'file'),
@@ -842,6 +861,7 @@ function updateAccountRow(id, patch) {
     JSON.stringify(next.account || {}),
     JSON.stringify(next.auth || {}),
     JSON.stringify(Array.isArray(next.accounts) ? next.accounts : []),
+    next.autoCheckin === undefined ? 1 : (next.autoCheckin ? 1 : 0),
     Number(next.lastUsedAt) || 0,
     Number(next.useCount) || 0,
     Date.now(),
@@ -880,6 +900,41 @@ function setAccountPool(config) {
     'INSERT INTO account_pool(id, config, updated_at) VALUES(1, ?, ?) ON CONFLICT(id) DO UPDATE SET config=excluded.config, updated_at=excluded.updated_at'
   ).run(JSON.stringify(cfg), now);
   return getAccountPool();
+}
+
+/* ============================ 自动每日签到状态 ============================ */
+
+/** 读取某账号的签到状态：{ lastDate, nextAt } 或 null */
+function getCheckinState(accountId) {
+  if (!accountId) return null;
+  const r = getDb().prepare('SELECT last_date, next_at FROM checkin_state WHERE account_id = ?').get(accountId);
+  if (!r) return null;
+  return { lastDate: r.last_date || '', nextAt: r.next_at || 0 };
+}
+
+/** 列出所有账号的签到状态（key 为 account_id） */
+function listCheckinStates() {
+  const rows = getDb().prepare('SELECT account_id, last_date, next_at FROM checkin_state').all();
+  const out = {};
+  for (const r of rows) out[r.account_id] = { lastDate: r.last_date || '', nextAt: r.next_at || 0 };
+  return out;
+}
+
+/** 写入某账号的签到状态 */
+function setCheckinState(accountId, { lastDate = '', nextAt = 0 } = {}) {
+  if (!accountId) return null;
+  const now = Date.now();
+  getDb().prepare(
+    'INSERT INTO checkin_state(account_id, last_date, next_at, updated_at) VALUES(?, ?, ?, ?) ' +
+    'ON CONFLICT(account_id) DO UPDATE SET last_date=excluded.last_date, next_at=excluded.next_at, updated_at=excluded.updated_at'
+  ).run(accountId, String(lastDate || ''), Number(nextAt) || 0, now);
+  return getCheckinState(accountId);
+}
+
+/** 删除某账号的签到状态（账号被删除时调用） */
+function deleteCheckinState(accountId) {
+  if (!accountId) return false;
+  return getDb().prepare('DELETE FROM checkin_state WHERE account_id = ?').run(accountId).changes > 0;
 }
 
 /* ============================ 管理页鉴权 ============================ */
@@ -1075,6 +1130,9 @@ module.exports = {
   // 账号池（登录态已迁移到 SQLite）
   listAccountRows, getAccountRow, insertAccount, updateAccountRow, deleteAccountRow, accountCount,
   getAccountPool, setAccountPool, defaultPoolConfig,
+
+  // 自动每日签到状态
+  getCheckinState, listCheckinStates, setCheckinState, deleteCheckinState,
 
   // 自定义模型
   addModel, listModels, removeModel, getModel,

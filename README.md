@@ -1,17 +1,20 @@
 # CodeBuddy API Proxy
 
-把本地 VSCode 里 **腾讯云 CodeBuddy** 插件的登录态 / API 代理成 **OpenAI 兼容接口**，供 Cursor、Continue、OpenAI SDK、Codex CLI 等直接调用。
+把 **腾讯云 CodeBuddy** 的账号登录态 / API 代理成 **OpenAI 兼容接口**，供 Cursor、Continue、OpenAI SDK、Codex CLI 等直接调用。
 
+- **内置 OAuth 登录**：无需依赖 VSCode 插件，直接在管理页用浏览器完成 CodeBuddy 账号登录（支持多账号账号池）。也可从 VSCode 插件读取登录态、或用 refresh_token 手工导入。
 - 服务端只用 Node 内置模块（含 `node:sqlite`），入口是 `server.js`，逻辑在 `core/`。
 - 管理页是 Vite + Vue 3（Alova 请求、vue-i18n、浅色/深色），构建产物在 `dist/`，**服务启动后从 `dist/` 托管**。
 
 ## 核心特性
 
-1. **直接读 VSCode 插件登录态**（macOS）：启动时从 VSCode / Cursor 等 SecretStorage 解密 CodeBuddy token，读不到再走 OAuth。
-2. **管理页** `http://127.0.0.1:3800/home`：总览、模型、日志、系统配置；中/英文；浅色 / 深色 / 跟随系统。
-3. **OpenAI 兼容**：`/v1/chat/completions`（流式 + 非流式自动聚合）、`/v1/completions`、`/v1/embeddings`。
-4. **Responses API**：`/v1/responses`，可接 Codex CLI。
-5. **SQLite 日志与配置**：写入 `~/.codebuddy-proxy/proxy.db`，可在管理页查询和改设置。
+1. **内置 OAuth 登录**：管理页「账号管理」里点「添加账号」即弹出浏览器完成 CodeBuddy OAuth 登录，支持添加多个账号组成**账号池**（轮询 / 指定账号两种消耗模式）。首次使用无需任何 VSCode 配置。
+2. **VSCode 登录态读取（可选）**：macOS 上可一键从 VSCode / Cursor 等插件的 SecretStorage 解密 CodeBuddy token 导入账号；也可粘贴 `refresh_token` 手工导入。
+3. **每日自动签到**：每个账号可单独开关「自动签到」（默认开启），服务端在**每天的随机时间**自动执行签到，避免固定时间被审计。
+4. **管理页** `http://127.0.0.1:3800/home`：总览、账号、模型、日志、系统配置；中/英文；浅色 / 深色 / 跟随系统。
+5. **OpenAI 兼容**：`/v1/chat/completions`（流式 + 非流式自动聚合）、`/v1/completions`、`/v1/embeddings`。
+6. **Responses API**：`/v1/responses`，可接 Codex CLI。
+7. **SQLite 日志与配置**：写入 `~/.codebuddy-proxy/proxy.db`，可在管理页查询和改设置。
 
 ## 运行
 
@@ -40,11 +43,21 @@ CODEBUDDY_NO_OPEN=1 npm start
 
 未执行 `npm run build` 时，打开管理页会提示先构建。若拉取了最新代码但未重新构建管理页，服务端会比对 `web/` 源码与 `dist/` 产物的时间戳，并在管理页顶部提示重新构建（`npm install && npm run build` 后重启）。
 
+## 首次使用
+
+1. `npm install && npm run build && npm start`
+2. 打开管理页 `http://127.0.0.1:3800/home`
+3. 在「账号管理」页点「添加账号」，浏览器完成 CodeBuddy OAuth 登录（可重复添加多个账号）
+4. 把其它工具的 `base_url` 指向 `http://127.0.0.1:3800/v1` 即可调用
+
+> 无需 VSCode 插件。macOS 上也可选「从 VSCode 插件读取」直接导入插件里已保存的登录态。
+
 ## 管理页
 
 | 路径 | 页面 |
 |---|---|
 | `/home` | 总览：登录状态、代理地址、curl 示例、接口一览、Token 消耗趋势图（可按 OAuth 账号 / API 密钥维度切换） |
+| `/accounts` | 账号管理：OAuth 登录 / 从 VSCode 读取 / 手工导入、账号池模式、**自动签到开关**、签到状态与积分余额 |
 | `/apikeys` | API 密钥：新增 / 删除 / 重新生成多个密钥、校验开关 |
 | `/usage` | 使用记录：请求与 token 用量明细、按账号 / 密钥 / 模型筛选、CSV 导出 |
 | `/models` | 模型列表（浏览器访问为页面；`Accept: application/json` 时仍返回模型 JSON） |
@@ -62,6 +75,15 @@ CODEBUDDY_NO_OPEN=1 npm start
 - 默认模型、强制模型
 - 上游请求超时、CORS Origin
 
+## 自动签到
+
+账号管理页里每个账号都有一个「自动签到」开关（**默认开启**）。开启后，服务端会在**每天的随机时间**（默认在 05:00–09:00 之间随机取整分钟，并带秒级抖动）自动对该账号执行一次每日签到，避免固定时间点签到被官方审计识别。
+
+- 每个账号独立随机，互不相同。
+- 签到目标时间与「上次签到日期」持久化在 SQLite（`checkin_state` 表），服务重启后不会重复签到，也不会漏签。
+- 签到失败（如 token 失效、活动未开）会自动在稍后随机间隔重试，并在日志（分类 `auth`）里记录结果。
+- 也可随时点账号行内的「签到」按钮手动签到；自动签到开关只影响后台自动任务，不影响手动签到。
+
 ## 数据文件
 
 默认都在 `~/.codebuddy-proxy/`（可用 `CODEBUDDY_DATA_DIR` 覆盖）：
@@ -69,15 +91,13 @@ CODEBUDDY_NO_OPEN=1 npm start
 | 文件 | 说明 |
 |---|---|
 | `session.json` | OAuth / VSCode 登录态（权限 `0600`），含 `accessToken`、`refreshToken`、账号。也可用 `CODEBUDDY_SESSION_FILE` 单独指定 |
-| `proxy.db` | SQLite：`logs` 表 + `config` 表 + `models` 表（自定义模型）+ `api_keys` 表 + `usage` 表（用量统计）。也可用 `CODEBUDDY_DB_FILE` 单独指定 |
+| `proxy.db` | SQLite：`logs` 表 + `config` 表 + `models` 表（自定义模型）+ `api_keys` 表 + `usage` 表（用量统计）+ `accounts`/账号池 + `checkin_state`（自动签到状态）。也可用 `CODEBUDDY_DB_FILE` 单独指定 |
 
-启动读登录态的优先级：
+账号登录态的优先级（多种方式，取其一即可）：
 
-1. VSCode 系编辑器 SecretStorage（macOS）
-2. 本地 `session.json`
-3. 都没有 → 管理页提示 OAuth 登录
-
-管理页「从 VSCode 重新读取」对应 `GET /api/import-vscode`。
+1. **OAuth 网页登录**（管理页「添加账号」，推荐，无需 VSCode）
+2. VSCode 系编辑器 SecretStorage（macOS，管理页「从 VSCode 插件读取」）
+3. refresh_token 手工导入
 
 VSCode 解密（逆向自 `tencent-cloud.coding-copilot`）：token 在 `state.vscdb` 的 `ItemTable`，key 为
 
@@ -257,7 +277,7 @@ sqlite3 ~/.codebuddy-proxy/proxy.db "DELETE FROM admin_users; DELETE FROM admin_
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/` `/home` `/logs` `/settings` `/login` | 管理页 SPA（`dist/`） |
+| GET | `/` `/home` `/logs` `/settings` `/login` `/accounts` | 管理页 SPA（`dist/`） |
 | GET | `/models` | 浏览器：管理页；JSON Accept：模型列表 |
 | GET | `/api/status` | 登录状态、打码 token、模型目录 |
 | GET | `/api/config` | 系统配置 + 运行时信息 |
@@ -266,6 +286,15 @@ sqlite3 ~/.codebuddy-proxy/proxy.db "DELETE FROM admin_users; DELETE FROM admin_
 | DELETE | `/api/logs` | 清空日志 |
 | GET | `/api/stats` | 日志统计 |
 | GET | `/api/import-vscode` | 从 VSCode 重读登录态 |
+| GET | `/api/accounts` | 账号池列表 + 池配置（含 `autoCheckin` 开关） |
+| PUT | `/api/accounts/:id` | 重命名 / 开关自动签到（body `{ name }` / `{ autoCheckin }`） |
+| POST | `/api/accounts/login` | 发起 OAuth 登录，返回 `authUrl` |
+| GET | `/api/accounts/login/status` | 查询 OAuth 登录进度 |
+| POST | `/api/accounts/import` | 用 refresh_token 手工导入账号 |
+| DELETE | `/api/accounts/:id` | 删除账号 |
+| GET | `/api/checkin/status` | 查询签到状态（可指定 `accountId`） |
+| POST | `/api/checkin` | 执行签到（可指定 `accountId`） |
+| GET | `/api/credits` | 查询积分余额（可指定 `accountId`） |
 | POST | `/api/logout` | 退出登录（JSON） |
 | GET | `/health` | 健康检查 |
 | GET | `/login/state` | 获取 OAuth `state` + `authUrl` |
@@ -284,7 +313,7 @@ sqlite3 ~/.codebuddy-proxy/proxy.db "DELETE FROM admin_users; DELETE FROM admin_
 | POST | `/api/keys/regenerate/:id` | 重新生成密钥（旧密钥立即失效） |
 | DELETE | `/api/keys/:id` | 删除 API 密钥 |
 | GET | `/api/usage` | 用量记录：按时间 / 账号 / 密钥 / 模型筛选、分页，含 token 汇总 |
-| GET | `/api/usage/stats?dimension=account\|apiKey` | 按天聚合的 token 用量，供首页图表 |
+| GET | `/api/usage/stats?dimension=account|apiKey` | 按天聚合的 token 用量，供首页图表 |
 
 ## 用量统计
 
@@ -335,11 +364,13 @@ server.js          启动入口
 core/              服务端
   index.js         HTTP 服务装配
   config.js        环境变量 / 默认值
-  store.js         SQLite 日志 + 系统配置
+  store.js         SQLite 日志 + 系统配置 + 账号池 + 签到状态
   logger.js        统一日志
-  session.js       登录态
+  session.js       登录态 / 账号池
   auth.js          OAuth / token 刷新
   vscode.js        从 VSCode 解密登录态
+  checkin.js       每日签到（查询 / 执行）
+  checkinScheduler.js  自动签到调度（随机时间）
   openai.js        OpenAI 兼容转发
   responses.js     /v1/responses 转换
   models.js        模型目录
