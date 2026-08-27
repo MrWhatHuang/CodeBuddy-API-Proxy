@@ -31,9 +31,9 @@ loadChart('account');
 const chartSeries = computed(() => usageStats.value?.series || []);
 const chartDays = computed(() => usageStats.value?.days || []);
 
-const host = computed(() => (typeof window !== 'undefined' ? window.location.host : '127.0.0.1:3800'));
-const baseUrl = computed(() => status.value?.baseUrl || `http://${host.value}`);
-const openaiBaseUrl = computed(() => status.value?.openaiBaseUrl || `http://${host.value}/v1`);
+const origin = computed(() => (typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:3800'));
+const baseUrl = computed(() => origin.value);
+const openaiBaseUrl = computed(() => `${origin.value}/v1`);
 const curlTest = computed(() => `curl -N ${openaiBaseUrl.value}/chat/completions \\
   -H "Content-Type: application/json" \\
   -d '{"model":"default","stream":true,"messages":[{"role":"user","content":"你好"}]}'`);

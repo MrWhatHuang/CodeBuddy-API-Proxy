@@ -78,6 +78,9 @@ const MODEL_CATALOG = [
  * 把内置目录与数据库中的自定义模型合并（自定义模型覆盖同 id 内置项）。
  * hiddenIds：被隐藏的模型 id 集合（含内置与自定义）。被隐藏的模型标记 hidden:true，
  * 并按稳定顺序排到列表末尾（其余模型保持原顺序）。
+ *
+ * /api/* 管理接口返回全部（含 hidden 标记）；/v1/models 与 /models 通过
+ * modelsResponse() 过滤掉 hidden 项后再对外返回。
  */
 function allModels(customModels, hiddenIds) {
   const custom = customModels || [];
@@ -95,12 +98,14 @@ function allModels(customModels, hiddenIds) {
   return visible.concat(hiddenList);
 }
 
-function modelsResponse(customModels) {
+function modelsResponse(customModels, hiddenIds) {
   const now = Math.floor(Date.now() / 1000);
-  const data = allModels(customModels).map((m) => ({
-    id: m.id, object: 'model', created: now, owned_by: 'codebuddy',
-    name: m.name, is_default: !!m.isDefault,
-  }));
+  const data = allModels(customModels, hiddenIds)
+    .filter((m) => !m.hidden)
+    .map((m) => ({
+      id: m.id, object: 'model', created: now, owned_by: 'codebuddy',
+      name: m.name, is_default: !!m.isDefault,
+    }));
   return { object: 'list', data };
 }
 

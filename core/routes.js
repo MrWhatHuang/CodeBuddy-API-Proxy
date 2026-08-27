@@ -596,7 +596,7 @@ async function route(req, res) {
   if (pathname === '/v1/models') {
     const keyCheck = auth.verifyClientKey(req);
     if (!keyCheck.ok) { util.sendJson(res, keyCheck.rateLimited ? 429 : 401, { error: { message: keyCheck.message, type: 'authentication_error' } }); return; }
-    util.sendJson(res, 200, models.modelsResponse(store.listModels()));
+    util.sendJson(res, 200, models.modelsResponse(store.listModels(), store.getHiddenModels()));
     return;
   }
   if (pathname === '/models' && method === 'GET') {
@@ -604,7 +604,7 @@ async function route(req, res) {
     if (accept.includes('text/html')) { serveIndex(res); return; }
     const keyCheck = auth.verifyClientKey(req);
     if (!keyCheck.ok) { util.sendJson(res, keyCheck.rateLimited ? 429 : 401, { error: { message: keyCheck.message, type: 'authentication_error' } }); return; }
-    util.sendJson(res, 200, models.modelsResponse(store.listModels()));
+    util.sendJson(res, 200, models.modelsResponse(store.listModels(), store.getHiddenModels()));
     return;
   }
 
