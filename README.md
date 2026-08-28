@@ -2,7 +2,7 @@
 
 把 **腾讯云 CodeBuddy** 的账号登录态 / API 代理成 **OpenAI 兼容接口**，供 Cursor、Continue、OpenAI SDK、Codex CLI 等直接调用。
 
-- **内置 OAuth 登录**：无需依赖 VSCode 插件，直接在管理页用浏览器完成 CodeBuddy 账号登录（支持多账号账号池）。也可从 VSCode 插件读取登录态、或用 refresh_token 手工导入。
+- **内置 OAuth 登录**：直接在管理页用浏览器完成 CodeBuddy 账号登录（支持多账号账号池）。也可从 VSCode 插件读取登录态、或用 refresh_token 手工导入。
 - 服务端只用 Node 内置模块（含 `node:sqlite`），入口是 `server.js`，逻辑在 `core/`。
 - 管理页是 Vite + Vue 3（Alova 请求、vue-i18n、浅色/深色），构建产物在 `dist/`，**服务启动后从 `dist/` 托管**。
 
