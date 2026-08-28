@@ -152,6 +152,18 @@ function getDb() {
       locked_until   INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_rate_limits_scope ON rate_limits(scope);
+
+    -- 每日积分快照（按账号），每天 0 时记录一次 usageUsed/usageLeft/usageTotal，
+    -- 用于计算「今日消耗」（当前 usageUsed - 今日 0 时快照 usageUsed）。
+    CREATE TABLE IF NOT EXISTS credit_snapshots (
+      account_id   TEXT NOT NULL,
+      date_key     TEXT NOT NULL,          -- 'YYYY-MM-DD'，快照所属本地日期
+      usage_used   REAL NOT NULL DEFAULT 0,  -- 当日 0 时快照的已消耗积分
+      usage_left   REAL NOT NULL DEFAULT 0,  -- 当日 0 时快照的剩余积分
+      usage_total  REAL NOT NULL DEFAULT 0,  -- 当日 0 时快照的总积分
+      updated_at   INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (account_id, date_key)
+    );
     `);
 
   // 兼容旧库：若 usage 表缺少 cached_tokens 列则补充
@@ -937,6 +949,39 @@ function deleteCheckinState(accountId) {
   return getDb().prepare('DELETE FROM checkin_state WHERE account_id = ?').run(accountId).changes > 0;
 }
 
+/* ============================ 每日积分快照 ============================ */
+
+/** 读取某账号某日期的积分快照：{ usageUsed, usageLeft, usageTotal } 或 null */
+function getCreditSnapshot(accountId, dateKey) {
+  if (!accountId || !dateKey) return null;
+  const r = getDb().prepare(
+    'SELECT usage_used, usage_left, usage_total FROM credit_snapshots WHERE account_id = ? AND date_key = ?'
+  ).get(accountId, String(dateKey));
+  if (!r) return null;
+  return { usageUsed: Number(r.usage_used) || 0, usageLeft: Number(r.usage_left) || 0, usageTotal: Number(r.usage_total) || 0 };
+}
+
+/** 写入某账号某日期的积分快照（upsert）。@returns 快照对象 */
+function setCreditSnapshot(accountId, dateKey, { usageUsed = 0, usageLeft = 0, usageTotal = 0 } = {}) {
+  if (!accountId || !dateKey) return null;
+  const now = Date.now();
+  getDb().prepare(
+    'INSERT INTO credit_snapshots(account_id, date_key, usage_used, usage_left, usage_total, updated_at) VALUES(?, ?, ?, ?, ?, ?) ' +
+    'ON CONFLICT(account_id, date_key) DO UPDATE SET ' +
+    'usage_used=excluded.usage_used, usage_left=excluded.usage_left, usage_total=excluded.usage_total, updated_at=excluded.updated_at'
+  ).run(
+    accountId, String(dateKey),
+    Number(usageUsed) || 0, Number(usageLeft) || 0, Number(usageTotal) || 0, now
+  );
+  return getCreditSnapshot(accountId, dateKey);
+}
+
+/** 删除某账号所有积分快照（账号被删除时调用） */
+function deleteCreditSnapshots(accountId) {
+  if (!accountId) return false;
+  return getDb().prepare('DELETE FROM credit_snapshots WHERE account_id = ?').run(accountId).changes > 0;
+}
+
 /* ============================ 管理页鉴权 ============================ */
 
 /** scrypt 派生密码哈希，返回 `scrypt$N$r$p$salt$hash`（salt/hash 均为 hex） */
@@ -1133,6 +1178,9 @@ module.exports = {
 
   // 自动每日签到状态
   getCheckinState, listCheckinStates, setCheckinState, deleteCheckinState,
+
+  // 每日积分快照
+  getCreditSnapshot, setCreditSnapshot, deleteCreditSnapshots,
 
   // 自定义模型
   addModel, listModels, removeModel, getModel,

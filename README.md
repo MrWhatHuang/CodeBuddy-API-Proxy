@@ -84,6 +84,14 @@ CODEBUDDY_NO_OPEN=1 npm start
 - 签到失败（如 token 失效、活动未开）会自动在稍后随机间隔重试，并在日志（分类 `auth`）里记录结果。
 - 也可随时点账号行内的「签到」按钮手动签到；自动签到开关只影响后台自动任务，不影响手动签到。
 
+## 积分与今日消耗
+
+账号管理页的「积分余额」列会显示每个账号当前**剩余积分**，下方附带**今日消耗**（今天 0 时以来已消耗的积分）。
+
+- 服务端会在**每天 0 时后**（本地日期首次 tick，含服务重启后补快照）把每个账号当前的已消耗/剩余/总积分快照写入 SQLite（`credit_snapshots` 表）。
+- **今日消耗** = 当前已消耗积分（`usageUsed`）－ 今日 0 时快照的已消耗积分。
+- 若当天还没有快照（例如服务当天刚启动、尚未到 0 时），会以当前值作为当日基线写入，此时今日消耗记为 `0`，之后再查询即为「现在 － 今日 0 时基线」。
+
 ## 数据文件
 
 默认都在 `~/.codebuddy-proxy/`（可用 `CODEBUDDY_DATA_DIR` 覆盖）：
@@ -91,7 +99,7 @@ CODEBUDDY_NO_OPEN=1 npm start
 | 文件 | 说明 |
 |---|---|
 | `session.json` | OAuth / VSCode 登录态（权限 `0600`），含 `accessToken`、`refreshToken`、账号。也可用 `CODEBUDDY_SESSION_FILE` 单独指定 |
-| `proxy.db` | SQLite：`logs` 表 + `config` 表 + `models` 表（自定义模型）+ `api_keys` 表 + `usage` 表（用量统计）+ `accounts`/账号池 + `checkin_state`（自动签到状态）。也可用 `CODEBUDDY_DB_FILE` 单独指定 |
+| `proxy.db` | SQLite：`logs` 表 + `config` 表 + `models` 表（自定义模型）+ `api_keys` 表 + `usage` 表（用量统计）+ `accounts`/账号池 + `checkin_state`（自动签到状态）+ `credit_snapshots`（每日积分快照）。也可用 `CODEBUDDY_DB_FILE` 单独指定 |
 
 账号登录态的优先级（多种方式，取其一即可）：
 
@@ -371,6 +379,8 @@ core/              服务端
   vscode.js        从 VSCode 解密登录态
   checkin.js       每日签到（查询 / 执行）
   checkinScheduler.js  自动签到调度（随机时间）
+  credits.js       积分余额 / 今日消耗
+  creditScheduler.js   每日积分快照调度（0 时后）
   openai.js        OpenAI 兼容转发
   responses.js     /v1/responses 转换
   models.js        模型目录

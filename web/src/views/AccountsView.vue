@@ -130,6 +130,15 @@ function creditsText(acct) {
   return String(left);
 }
 
+// 今日消耗（积分）：当前 usageUsed - 今日 0 时快照 usageUsed；无快照时为 '-'。
+function todayUsedText(acct) {
+  const c = creditsMap.value[acct.id];
+  if (!c) return '';
+  if (c.__error) return '-';
+  if (typeof c.todayUsed !== 'number') return '-';
+  return String(c.todayUsed);
+}
+
 async function setMode(v) {
   try {
     const r = await api.setPool({ mode: v });
@@ -361,7 +370,13 @@ load();
               <td class="muted">{{ fmt(a.expiresAt) }}</td>
               <td class="muted">{{ a.useCount }} / {{ fmt(a.lastUsedAt) }}</td>
               <td class="credits-cell">
-                <span v-if="creditsText(a)" class="credits-value">{{ creditsText(a) }}</span>
+                <template v-if="creditsText(a)">
+                  <div class="credits-value">{{ creditsText(a) }}</div>
+                  <div class="credits-today" v-if="todayUsedText(a) !== '-'">
+                    {{ t('accounts.todayUsed') }}：<b>{{ todayUsedText(a) }}</b>
+                  </div>
+                  <div class="credits-today" v-else>{{ t('accounts.todayUsed') }}：-</div>
+                </template>
                 <span v-else class="muted">{{ creditsLoading ? t('common.loading') : '-' }}</span>
               </td>
               <td>
@@ -466,6 +481,8 @@ tr.pinned td { background: var(--primary-soft); }
 .checkin-state.error { color: var(--danger, #f85149); }
 .credits-cell { white-space: nowrap; }
 .credits-value { font-weight: 600; color: var(--text); }
+.credits-today { font-size: 12px; color: var(--text-2); margin-top: 2px; }
+.credits-today b { color: var(--warning, #d29922); font-weight: 600; }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
 .add-card { margin-top: 16px; }
 .input { width: 100%; max-width: 420px; }

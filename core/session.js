@@ -298,6 +298,7 @@ function removeAccount(id) {
   if (removed) {
     persistPool();
     try { store.deleteCheckinState(id); } catch (e) { /* ignore */ }
+    try { store.deleteCreditSnapshots(id); } catch (e) { /* ignore */ }
   }
   return removed;
 }

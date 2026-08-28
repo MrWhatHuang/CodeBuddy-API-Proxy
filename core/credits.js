@@ -21,6 +21,7 @@ const logger = require('./logger');
 const util = require('./util');
 const auth = require('./auth');
 const sessionMod = require('./session');
+const store = require('./store');
 
 const WORKBUDDY_CLIENT_VERSION = '5.3.14';
 
@@ -88,6 +89,22 @@ async function getCredits(accountId) {
   const usageLeft = resources.reduce((s, x) => s + x.left, 0);
   const usageTotal = resources.reduce((s, x) => s + x.total, 0);
   const usageUsed = resources.reduce((s, x) => s + x.used, 0);
+
+  // 今日消耗 = 当前已消耗积分 - 今日 0 时快照的已消耗积分。
+  // 若今天还没有快照（比如服务刚启动、还没到 0 时调度器快照），则把当前值
+  // 作为当日基线写入，此时今日消耗记为 0；后续再查即为「现在 - 今日 0 时基线」。
+  let todayUsed = 0;
+  let snapshotUsed = null;
+  if (account && account.id) {
+    const dateKey = todayKey(Date.now());
+    let snap = store.getCreditSnapshot(account.id, dateKey);
+    if (!snap) {
+      snap = store.setCreditSnapshot(account.id, dateKey, { usageUsed, usageLeft, usageTotal });
+    }
+    snapshotUsed = snap ? snap.usageUsed : null;
+    todayUsed = Math.max(0, usageUsed - (snapshotUsed || 0));
+  }
+
   return {
     ok: true,
     code: json.code,
@@ -95,10 +112,21 @@ async function getCredits(accountId) {
     usageLeft,
     usageTotal,
     usageUsed,
+    todayUsed,
+    snapshotUsed,
     resources,
     account: account ? (account.name || account.account.uid) : '',
     accountId: account ? account.id : accountId,
   };
+}
+
+/** 本地时区今天日期 key：YYYY-MM-DD */
+function todayKey(now) {
+  const d = new Date(now);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + day;
 }
 
 module.exports = { getCredits };

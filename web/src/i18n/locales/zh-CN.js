@@ -347,6 +347,7 @@ export default {
     autoCheckinHint: '开启后每天在随机时间自动签到（默认开启），避免固定时间被审计',
     credits: '积分余额',
     creditsFail: '查询积分失败',
+    todayUsed: '今日消耗',
   },
   login: {
     title: '正在登录 CodeBuddy…',

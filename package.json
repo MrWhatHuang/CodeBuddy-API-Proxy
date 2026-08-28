@@ -11,7 +11,7 @@
     "dev": "vite --config web/vite.config.mjs",
     "build": "vite build --config web/vite.config.mjs",
     "preview": "vite preview --config web/vite.config.mjs",
-    "test": "node --check server.js && node --check core/index.js && node --check core/store.js && node --check core/routes.js && node --check core/auth.js && node --check core/config.js && node --check core/checkin.js && node --check core/checkinScheduler.js"
+    "test": "node --check server.js && node --check core/index.js && node --check core/store.js && node --check core/routes.js && node --check core/auth.js && node --check core/config.js && node --check core/checkin.js && node --check core/checkinScheduler.js && node --check core/credits.js && node --check core/creditScheduler.js"
   },
   "engines": {
     "node": ">=22.5.0"

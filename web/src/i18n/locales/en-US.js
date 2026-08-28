@@ -347,6 +347,7 @@ export default {
     autoCheckinHint: 'When on, check in automatically at a random time each day (default on) to avoid fixed-time auditing',
     credits: 'Credits',
     creditsFail: 'Failed to load credits',
+    todayUsed: 'Used today',
   },
   login: {
     title: 'Signing in to CodeBuddy…',
