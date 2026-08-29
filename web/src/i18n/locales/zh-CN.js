@@ -12,6 +12,7 @@ export default {
     logs: '日志',
     settings: '系统配置',
     login: '登录',
+    github: 'GitHub',
   },
   common: {
     loading: '加载中…',

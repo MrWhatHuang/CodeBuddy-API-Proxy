@@ -29,6 +29,16 @@ function toggleLocale() {
   <header class="topbar">
     <h1 class="title">{{ title }}</h1>
     <div class="actions">
+      <a
+        class="icon-btn"
+        href="https://github.com/MrWhatHuang/CodeBuddy-API-Proxy"
+        target="_blank"
+        rel="noopener noreferrer"
+        :title="t('nav.github')"
+      >
+        <Icon name="github" :size="16" />
+        <span class="hide-sm">{{ t('nav.github') }}</span>
+      </a>
       <button class="icon-btn" :title="themeLabel" @click="toggleTheme">
         <Icon :name="themeIcon" :size="16" />
         <span class="hide-sm">{{ themeLabel }}</span>

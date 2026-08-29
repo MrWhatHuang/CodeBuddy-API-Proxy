@@ -12,6 +12,7 @@ export default {
     logs: 'Logs',
     settings: 'Settings',
     login: 'Sign in',
+    github: 'GitHub',
   },
   common: {
     loading: 'Loading…',
