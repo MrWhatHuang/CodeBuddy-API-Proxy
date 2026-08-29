@@ -10,7 +10,7 @@
 
 1. **内置 OAuth 登录**：管理页「账号管理」里点「添加账号」即弹出浏览器完成 CodeBuddy OAuth 登录，支持添加多个账号组成**账号池**（轮询 / 指定账号两种消耗模式）。首次使用无需任何 VSCode 配置。
 2. **VSCode 登录态读取（可选）**：macOS 上可一键从 VSCode / Cursor 等插件的 SecretStorage 解密 CodeBuddy token 导入账号；也可粘贴 `refresh_token` 手工导入。
-3. **每日自动签到**：每个账号可单独开关「自动签到」（默认开启），服务端在**每天的随机时间**自动执行签到，避免固定时间被审计。
+3. **每日自动签到**：账号管理页顶部有全局「自动签到」开关（默认开启），服务端按北京时间每天在随机时间自动执行签到，错过窗口会补签。
 4. **管理页** `http://127.0.0.1:3800/home`：总览、账号、模型、日志、系统配置；中/英文；浅色 / 深色 / 跟随系统。
 5. **OpenAI 兼容**：`/v1/chat/completions`（流式 + 非流式自动聚合）、`/v1/completions`、`/v1/embeddings`。
 6. **Responses API**：`/v1/responses`，可接 Codex CLI。
@@ -57,7 +57,7 @@ CODEBUDDY_NO_OPEN=1 npm start
 | 路径 | 页面 |
 |---|---|
 | `/home` | 总览：登录状态、代理地址、curl 示例、接口一览、Token 消耗趋势图（可按 OAuth 账号 / API 密钥维度切换） |
-| `/accounts` | 账号管理：OAuth 登录 / 从 VSCode 读取 / 手工导入、账号池模式、**自动签到开关**、签到状态与积分余额 |
+| `/accounts` | 账号管理：OAuth 登录 / 从 VSCode 读取 / 手工导入、账号池模式、**顶部全局自动签到开关**、签到状态与积分余额 |
 | `/apikeys` | API 密钥：新增 / 删除 / 重新生成多个密钥、校验开关 |
 | `/usage` | 使用记录：请求与 token 用量明细、按账号 / 密钥 / 模型筛选、CSV 导出 |
 | `/models` | 模型列表（浏览器访问为页面；`Accept: application/json` 时仍返回模型 JSON） |
@@ -77,12 +77,15 @@ CODEBUDDY_NO_OPEN=1 npm start
 
 ## 自动签到
 
-账号管理页里每个账号都有一个「自动签到」开关（**默认开启**）。开启后，服务端会在**每天的随机时间**（默认在 05:00–09:00 之间随机取整分钟，并带秒级抖动）自动对该账号执行一次每日签到，避免固定时间点签到被官方审计识别。
+账号管理页**顶部**有一个全局「自动签到」开关（**默认开启**），对账号池里所有账号生效。开启后，服务端会按 **Asia/Shanghai（北京时间）** 的自然日，在 **05:00–09:00** 之间随机取整分钟（带秒级抖动）自动签到，避免固定时间点被官方审计识别。
 
 - 每个账号独立随机，互不相同。
+- 若服务在窗口结束后才启动/恢复（例如电脑睡眠到早上 10 点），会**立即补签**，不会因为随机时间已过而漏掉。
 - 签到目标时间与「上次签到日期」持久化在 SQLite（`checkin_state` 表），服务重启后不会重复签到，也不会漏签。
 - 签到失败（如 token 失效、活动未开）会自动在稍后随机间隔重试，并在日志（分类 `auth`）里记录结果。
-- 也可随时点账号行内的「签到」按钮手动签到；自动签到开关只影响后台自动任务，不影响手动签到。
+- 账号列表会显示「今日已签」或「今日未签 · 预计 HH:mm 自动签到」。
+- 也可随时点账号行内的「签到」按钮手动签到；顶部开关只影响后台自动任务，不影响手动签到。
+- 可用环境变量 `CODEBUDDY_TZ` 覆盖签到时区（默认 `Asia/Shanghai`）。
 
 ## 积分与今日消耗
 
@@ -177,6 +180,7 @@ codex exec "你的任务"
 | `CODEBUDDY_DATA_DIR` | `~/.codebuddy-proxy` | 数据目录 |
 | `CODEBUDDY_SESSION_FILE` | `~/.codebuddy-proxy/session.json` | 会话文件 |
 | `CODEBUDDY_DB_FILE` | `~/.codebuddy-proxy/proxy.db` | SQLite 数据库 |
+| `CODEBUDDY_TZ` | `Asia/Shanghai` | 自动签到使用的时区（按该时区的自然日与 05:00–09:00 窗口） |
 | `CODEBUDDY_FORCE_MODEL` | 空 | 强制替换请求 model |
 | `CODEBUDDY_DEFAULT_MODEL` | `default` | 缺省 model |
 | `CODEBUDDY_API_KEY` | 空 | 兼容旧版：指定单个 API 密钥（首次启动时迁移进 API 密钥表）。也可在管理页「API 密钥」里管理多个密钥 |
@@ -294,8 +298,9 @@ sqlite3 ~/.codebuddy-proxy/proxy.db "DELETE FROM admin_users; DELETE FROM admin_
 | DELETE | `/api/logs` | 清空日志 |
 | GET | `/api/stats` | 日志统计 |
 | GET | `/api/import-vscode` | 从 VSCode 重读登录态 |
-| GET | `/api/accounts` | 账号池列表 + 池配置（含 `autoCheckin` 开关） |
-| PUT | `/api/accounts/:id` | 重命名 / 开关自动签到（body `{ name }` / `{ autoCheckin }`） |
+| GET | `/api/accounts` | 账号池列表 + 池配置 + 全局 `autoCheckin` 开关 |
+| PUT | `/api/accounts` | 全局自动签到开关（body `{ autoCheckin }`） |
+| PUT | `/api/accounts/:id` | 重命名（body `{ name }`） |
 | POST | `/api/accounts/login` | 发起 OAuth 登录，返回 `authUrl` |
 | GET | `/api/accounts/login/status` | 查询 OAuth 登录进度 |
 | POST | `/api/accounts/import` | 用 refresh_token 手工导入账号 |

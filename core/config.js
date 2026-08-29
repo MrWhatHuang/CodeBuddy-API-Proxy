@@ -69,6 +69,7 @@ const DEFAULT_CONFIG = {
   'adminAuthEnabled': 'false',         // 是否开启管理页/管理接口鉴权（登录后访问）
   'requestTimeoutMs': '300000',       // 上游请求超时
   'cors.origin': '*',                 // CORS Allow-Origin
+  'autoCheckin': 'true',              // 账号池全局自动签到开关（默认开启）
 };
 
 const LOG_LEVELS = ['debug', 'info', 'warn', 'error'];

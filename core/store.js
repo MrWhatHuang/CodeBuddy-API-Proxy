@@ -1171,6 +1171,15 @@ function pruneRateLimits() {
     .run(now, now - 24 * 3600 * 1000);
 }
 
+function autoCheckinEnabled() {
+  return asBool(getConfig().autoCheckin, true);
+}
+
+function setAutoCheckinEnabled(on) {
+  setConfig({ autoCheckin: on ? 'true' : 'false' });
+  return autoCheckinEnabled();
+}
+
 module.exports = {
   // 账号池（登录态已迁移到 SQLite）
   listAccountRows, getAccountRow, insertAccount, updateAccountRow, deleteAccountRow, accountCount,
@@ -1178,6 +1187,7 @@ module.exports = {
 
   // 自动每日签到状态
   getCheckinState, listCheckinStates, setCheckinState, deleteCheckinState,
+  autoCheckinEnabled, setAutoCheckinEnabled,
 
   // 每日积分快照
   getCreditSnapshot, setCreditSnapshot, deleteCreditSnapshots,

@@ -27,8 +27,32 @@ const sessionMod = require('./session');
  * 注意：App 实际走的是 /v2/billing/meter/*（带 /v2 前缀），
  * 而不是 /billing/meter/*（那是废弃的旧接口，永远返回 active:false）。
  */
+const WORKBUDDY_CLIENT_VERSION = '5.3.14';
+
 function checkinUrl(sub) {
   return config.ENDPOINT + '/v2/billing/meter/' + sub;
+}
+
+function truthyFlag(v) {
+  return v === true || v === 1 || v === '1' || v === 'true';
+}
+
+/** 兼容上游 snake_case / camelCase 的「今日已签」字段 */
+function todayCheckedIn(data) {
+  if (!data || typeof data !== 'object') return false;
+  return truthyFlag(data.today_checked_in) || truthyFlag(data.todayCheckedIn)
+    || truthyFlag(data.already_checked_in) || truthyFlag(data.alreadyCheckedIn)
+    || truthyFlag(data.checked_in) || truthyFlag(data.checkedIn)
+    || truthyFlag(data.has_checked_in) || truthyFlag(data.hasCheckedIn)
+    || truthyFlag(data.is_checkin) || truthyFlag(data.isCheckin);
+}
+
+function normalizeStatusData(data) {
+  const src = data && typeof data === 'object' ? data : {};
+  return Object.assign({}, src, {
+    today_checked_in: todayCheckedIn(src),
+    active: src.active !== false,
+  });
 }
 
 /** 根据 accountId 解析账号并生成带鉴权的请求头 */
@@ -45,7 +69,14 @@ async function pickHeaders(accountId) {
   } else {
     acct = await auth.getValidSession();
   }
-  const headers = Object.assign({}, auth.buildAuthHeaders(acct), { Accept: 'application/json' });
+  const headers = Object.assign({}, auth.buildAuthHeaders(acct), {
+    Accept: 'application/json',
+    'X-Product': 'WorkBuddy',
+    'X-IDE-Type': 'WorkBuddy',
+    'X-IDE-Name': 'WorkBuddy',
+    'X-IDE-Version': WORKBUDDY_CLIENT_VERSION,
+    'User-Agent': 'WorkBuddy/' + WORKBUDDY_CLIENT_VERSION,
+  });
   return { headers, account: acct };
 }
 
@@ -69,7 +100,7 @@ async function checkinStatus(accountId) {
     logger.log('warn', 'auth', '查询签到状态失败: ' + msg);
     return { ok: false, error: msg, account: accountLabel(account), accountId: account ? account.id : accountId };
   }
-  return { ok: true, code: json.code, msg: json.msg, data: json.data || {}, account: accountLabel(account), accountId: account ? account.id : accountId };
+  return { ok: true, code: json.code, msg: json.msg, data: normalizeStatusData(json.data || {}), account: accountLabel(account), accountId: account ? account.id : accountId };
 }
 
 /**
@@ -95,7 +126,7 @@ async function dailyCheckin(accountId) {
     return { ok: false, error: msg, account: accountLabel(account), accountId: account ? account.id : accountId };
   }
   const data = json.data || {};
-  const alreadyCheckedIn = !!(data.alreadyCheckedIn || data.already_checked_in || data.checked_in);
+  const alreadyCheckedIn = todayCheckedIn(data);
   logger.log('info', 'auth', '每日签到成功' + (alreadyCheckedIn ? '（已签到）' : '') + (account ? ' - ' + accountLabel(account) : ''));
   return {
     ok: true, code: json.code, msg: json.msg, data,
@@ -105,4 +136,4 @@ async function dailyCheckin(accountId) {
   };
 }
 
-module.exports = { checkinStatus, dailyCheckin };
+module.exports = { checkinStatus, dailyCheckin, todayCheckedIn };

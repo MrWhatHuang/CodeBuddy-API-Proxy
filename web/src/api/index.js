@@ -53,6 +53,7 @@ export const api = {
   importAccount: (payload) => alova.Post('/api/accounts/import', payload),
   accountLoginStatus: (state) => alova.Get(`/api/accounts/login/status?state=${encodeURIComponent(state)}`),
   renameAccount: (id, name) => alova.Put(`/api/accounts/${encodeURIComponent(id)}`, { name }),
+  setAutoCheckin: (autoCheckin) => alova.Put('/api/accounts', { autoCheckin }),
   setAccountAutoCheckin: (id, autoCheckin) => alova.Put(`/api/accounts/${encodeURIComponent(id)}`, { autoCheckin }),
   deleteAccount: (id) => alova.Delete(`/api/accounts/${encodeURIComponent(id)}`),
   getPool: () => alova.Get('/api/pool'),

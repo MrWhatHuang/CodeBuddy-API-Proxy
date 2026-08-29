@@ -18,6 +18,7 @@ const auth = require('./auth');
 const openai = require('./openai');
 const responses = require('./responses');
 const checkin = require('./checkin');
+const checkinScheduler = require('./checkinScheduler');
 const credits = require('./credits');
 const adminAuth = require('./adminAuth');
 
@@ -72,6 +73,24 @@ function statusObject() {
 }
 
 /* ============================ 系统配置 ============================ */
+
+function accountsPayload() {
+  const pool = sessionMod.getPoolConfig();
+  const states = store.listCheckinStates();
+  const autoCheckin = store.autoCheckinEnabled();
+  const accounts = sessionMod.listAccounts().map(function (acct) {
+    const pub = accountPublic(acct);
+    const st = states[acct.id];
+    pub.checkinLastDate = st ? st.lastDate : '';
+    pub.checkinNextAt = st ? st.nextAt : 0;
+    return pub;
+  });
+  return { pool, accounts, autoCheckin };
+}
+
+function parseBoolFlag(v) {
+  return v === true || v === 'true' || v === 1 || v === '1';
+}
 
 function configResponse() {
   return {
@@ -450,9 +469,32 @@ async function route(req, res) {
 
   /* ---- 账号池管理 ---- */
   if (pathname === '/api/accounts' && method === 'GET') {
-    const pool = sessionMod.getPoolConfig();
-    const accounts = sessionMod.listAccounts().map(accountPublic);
-    util.sendJson(res, 200, { pool, accounts });
+    util.sendJson(res, 200, accountsPayload());
+    return;
+  }
+
+  if (pathname === '/api/accounts' && method === 'PUT') {
+    try {
+      const buf = await util.readBody(req);
+      const body = buf.length ? JSON.parse(buf.toString('utf8')) : {};
+      if (body.autoCheckin === undefined) {
+        util.sendJson(res, 400, { error: { message: '没有可更新的字段' } });
+        return;
+      }
+      const on = parseBoolFlag(body.autoCheckin);
+      store.setAutoCheckinEnabled(on);
+      const accounts = sessionMod.listAccounts();
+      for (const acct of accounts) {
+        try { sessionMod.updateAccount(acct.id, { autoCheckin: on }); } catch (e) { /* ignore */ }
+      }
+      logger.log('info', 'config', '全局自动签到已' + (on ? '开启' : '关闭'));
+      if (on) {
+        try { await checkinScheduler.tick(); } catch (e) { /* ignore */ }
+      }
+      util.sendJson(res, 200, accountsPayload());
+    } catch (e) {
+      util.sendJson(res, 400, { error: { message: '更新失败: ' + e.message } });
+    }
     return;
   }
 

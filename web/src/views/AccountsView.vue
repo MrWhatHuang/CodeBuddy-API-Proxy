@@ -9,6 +9,8 @@ const router = useRouter();
 
 const accounts = ref([]);
 const pool = ref({ mode: 'pool', strategy: 'round-robin', pinnedId: null });
+const autoCheckin = ref(true);
+const autoCheckinSaving = ref(false);
 const loading = ref(false);
 const notice = ref('');
 const showAdd = ref(false);
@@ -44,6 +46,7 @@ async function load() {
     const r = await api.listAccounts();
     accounts.value = r.accounts || [];
     pool.value = r.pool || { mode: 'pool', strategy: 'round-robin', pinnedId: null };
+    autoCheckin.value = r.autoCheckin !== false;
   } catch (e) {
     notice.value = t('common.error') + ': ' + e.message;
   } finally {
@@ -113,12 +116,27 @@ async function doCheckin(acct) {
   }
 }
 
+function isCheckedIn(s) {
+  if (!s) return false;
+  return !!(s.today_checked_in || s.todayCheckedIn || s.already_checked_in || s.alreadyCheckedIn
+    || s.checked_in || s.checkedIn || s.has_checked_in || s.hasCheckedIn);
+}
+
+function fmtTime(ms) {
+  if (!ms) return '';
+  return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
 function checkinState(acct) {
   const s = checkinMap.value[acct.id];
   if (!s) return null;
   if (s.__error) return { kind: 'error', text: s.__error };
   if (s.active === false) return { kind: 'off', text: t('accounts.checkinActivityOff') };
-  if (s.today_checked_in) return { kind: 'done', text: t('accounts.checkinToday') };
+  if (isCheckedIn(s)) return { kind: 'done', text: t('accounts.checkinToday') };
+  const nextAt = acct.checkinNextAt;
+  if (autoCheckin.value && nextAt && nextAt > Date.now()) {
+    return { kind: 'todo', text: t('accounts.checkinNotToday') + ' · ' + t('accounts.autoCheckinScheduled', { time: fmtTime(nextAt) }) };
+  }
   return { kind: 'todo', text: t('accounts.checkinNotToday') };
 }
 
@@ -250,14 +268,20 @@ function pollLogin(state) {
   }, 2000);
 }
 
-async function toggleAutoCheckin(acct) {
-  const next = !(acct.autoCheckin !== false);
+async function onAutoCheckinChange(ev) {
+  const next = !!ev.target.checked;
+  const prev = autoCheckin.value;
+  autoCheckin.value = next;
+  autoCheckinSaving.value = true;
   try {
-    await api.setAccountAutoCheckin(acct.id, next);
-    acct.autoCheckin = next;
-    notice.value = next ? t('accounts.autoCheckinOn') : t('accounts.autoCheckinOff');
+    const r = await api.setAutoCheckin(next);
+    autoCheckin.value = r.autoCheckin !== false;
+    notice.value = autoCheckin.value ? t('accounts.autoCheckinOn') : t('accounts.autoCheckinOff');
   } catch (e) {
+    autoCheckin.value = prev;
     notice.value = t('common.error') + ': ' + e.message;
+  } finally {
+    autoCheckinSaving.value = false;
   }
 }
 
@@ -336,6 +360,18 @@ load();
           <span>{{ t('accounts.modePinned') }}</span>
         </label>
         <span class="hint" v-if="pool.mode === 'pinned'">{{ t('accounts.pinnedHint') }}</span>
+        <span class="mode-spacer"></span>
+        <span class="mode-label">
+          {{ t('accounts.autoCheckin') }}
+          <span class="tip">
+            <span class="tip-icon">?</span>
+            <span class="tip-text">{{ t('accounts.autoCheckinHint') }}</span>
+          </span>
+        </span>
+        <label class="switch">
+          <input type="checkbox" :checked="autoCheckin" :disabled="autoCheckinSaving" @change="onAutoCheckinChange" />
+          <span class="slider"></span>
+        </label>
       </div>
 
       <p v-if="notice" class="hint notice">{{ notice }}</p>
@@ -384,10 +420,6 @@ load();
                   <span class="checkin-state" :class="checkinState(a).kind">{{ checkinState(a).text }}</span>
                 </template>
                 <span v-else class="muted">{{ checkinLoading ? t('common.loading') : '-' }}</span>
-                <label class="auto-checkin">
-                  <input type="checkbox" :checked="a.autoCheckin !== false" @change="toggleAutoCheckin(a)" />
-                  <span>{{ t('accounts.autoCheckin') }}</span>
-                </label>
               </td>
               <td class="ops">
                 <button class="btn btn-ghost btn-sm" :disabled="!!checkingId" @click="doCheckin(a)">{{ checkingId === a.id ? t('accounts.checkinDoing') : t('accounts.checkin') }}</button>
@@ -441,6 +473,7 @@ load();
 .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .head-actions { display: flex; align-items: center; gap: 8px; }
 .mode-row { display: flex; align-items: center; gap: 18px; margin: 8px 0 14px; flex-wrap: wrap; }
+.mode-spacer { flex: 1; min-width: 12px; }
 .mode-label { font-size: 13px; color: var(--text-2); font-weight: 600; }
 .radio { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
 .radio input { margin: 0; }
@@ -473,8 +506,6 @@ tr.pinned td { background: var(--primary-soft); }
 .strong { font-weight: 600; }
 .ops { display: flex; gap: 6px; justify-content: flex-end; white-space: nowrap; }
 .checkin-state { font-size: 12px; font-weight: 600; white-space: nowrap; }
-.auto-checkin { display: flex; align-items: center; gap: 5px; margin-top: 6px; font-size: 12px; color: var(--text-2); cursor: pointer; white-space: nowrap; }
-.auto-checkin input { margin: 0; }
 .checkin-state.done { color: var(--success, #3fb950); }
 .checkin-state.todo { color: var(--warning, #d29922); }
 .checkin-state.off { color: var(--text-2); }
