@@ -21,24 +21,83 @@ function sanitizeForBackend(s) {
   return s.replace(/Codex/gi, 'CodeBuddy').replace(/OpenAI/gi, 'Tencent');
 }
 
-function contentToText(content) {
+/**
+ * 从 Responses / Chat 两套写法里取出图片地址。
+ * Responses 的 input_image 是 { type:'input_image', image_url: '<字符串>', detail }，
+ * Chat Completions 的 image_url 是 { type:'image_url', image_url:{ url, detail } }，
+ * 两种都要认，否则图片会被降级成纯文本。
+ */
+function extractImageUrl(c) {
+  const raw = c.image_url !== undefined ? c.image_url : c.url;
+  if (typeof raw === 'string') return raw;
+  if (raw && typeof raw === 'object') return raw.url || '';
+  return '';
+}
+
+/** 转成 chat/completions 认识的 image_url 分片（Responses 的 detail 也带过去） */
+function toImagePart(c) {
+  const url = extractImageUrl(c);
+  if (!url) return null;
+  const detail = c.detail || (c.image_url && typeof c.image_url === 'object' && c.image_url.detail) || undefined;
+  const part = { type: 'image_url', image_url: detail ? { url, detail } : { url } };
+  return part;
+}
+
+/**
+ * Responses 的 content → chat/completions 的 content。
+ * 纯文本时返回字符串（保持原样，兼容只吃字符串的上游）；
+ * 只要含图片/音频等非文本分片，就返回分片数组，避免多模态信息被压平成文本。
+ */
+function contentToChat(content, { sanitizeText = false } = {}) {
+  const clean = (s) => (sanitizeText ? sanitizeForBackend(s) : s);
+
   if (content == null) return '';
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content.map((c) => {
-      if (typeof c === 'string') return c;
-      if (c && typeof c === 'object') {
-        if (c.type === 'input_text' || c.type === 'output_text' || c.type === 'text') return c.text || '';
-        if (c.type === 'input_image' || c.type === 'image_url' || c.type === 'image') {
-          return (typeof c.image_url === 'string' ? c.image_url : (c.image_url && c.image_url.url)) || '';
-        }
-        if (c.type === 'refusal') return c.refusal || '';
-      }
-      return '';
-    }).filter(Boolean).join('\n');
+  if (typeof content === 'string') return clean(content);
+  if (!Array.isArray(content)) {
+    if (typeof content === 'object') return contentToChat([content], { sanitizeText });
+    return clean(String(content));
   }
-  if (typeof content === 'object') return contentToText(Array.isArray(content) ? content : [content]);
-  return String(content);
+
+  const textParts = [];
+  const parts = [];
+  let hasNonText = false;
+
+  for (const c of content) {
+    if (typeof c === 'string') { textParts.push(c); parts.push({ type: 'text', text: clean(c) }); continue; }
+    if (!c || typeof c !== 'object') continue;
+
+    if (c.type === 'input_text' || c.type === 'output_text' || c.type === 'text') {
+      const t = c.text || '';
+      textParts.push(t);
+      parts.push({ type: 'text', text: clean(t) });
+      continue;
+    }
+    if (c.type === 'input_image' || c.type === 'image_url' || c.type === 'image') {
+      const part = toImagePart(c);
+      if (part) { hasNonText = true; parts.push(part); }
+      continue;
+    }
+    if (c.type === 'input_audio' || c.type === 'audio' || c.type === 'input_file' || c.type === 'file') {
+      // 上游不一定支持，但至少原样带过去，而不是静默丢掉
+      hasNonText = true;
+      parts.push(c);
+      continue;
+    }
+    if (c.type === 'refusal') { textParts.push(c.refusal || ''); parts.push({ type: 'text', text: clean(c.refusal || '') }); continue; }
+    // 未知分片类型：保留，避免信息静默丢失
+    hasNonText = true;
+    parts.push(c);
+  }
+
+  if (!hasNonText) return clean(textParts.filter(Boolean).join('\n'));
+  return parts;
+}
+
+/** 只要文本（tool 输出、system 提示等纯文本场景仍用它） */
+function contentToText(content) {
+  const r = contentToChat(content);
+  if (typeof r === 'string') return r;
+  return r.filter((p) => p.type === 'text').map((p) => p.text).join('\n');
 }
 
 function convertToolChoice(tc) {
@@ -82,16 +141,14 @@ function responsesToChatInput(p) {
         flushToolCalls();
         const isSys = item.role === 'developer' || item.role === 'system';
         const role = item.role === 'developer' ? 'system' : item.role;
-        const text = contentToText(item.content);
-        chat.messages.push({ role, content: isSys ? sanitizeForBackend(text) : text });
+        chat.messages.push({ role, content: contentToChat(item.content, { sanitizeText: isSys }) });
         continue;
       }
       if (item.type === 'message') {
         flushToolCalls();
         const isSys = item.role === 'developer' || item.role === 'system';
         const role = item.role === 'developer' ? 'system' : (item.role || 'user');
-        const text = contentToText(item.content);
-        chat.messages.push({ role, content: isSys ? sanitizeForBackend(text) : text });
+        chat.messages.push({ role, content: contentToChat(item.content, { sanitizeText: isSys }) });
       } else if (item.type === 'function_call') {
         pendingToolCalls.push({
           id: item.call_id || item.id || util.genId('call'),
