@@ -179,6 +179,7 @@ cd /tmp && OPENAI_API_KEY=dummy codex exec --skip-git-repo-check --ephemeral -s 
 | 改 Responses 转换 | `responsesToChatInput`（请求）、`streamChatToResponses`（流式响应）、`chatCompletionToResponse`（非流式响应） |
 | 改解密策略        | `decryptSafeStorage`（第 349 行），用 `JSON.parse` 判定策略对错                                               |
 | 调试 Codex 请求   | 设 `CODEBUDDY_DEBUG=1`，读 `/tmp/codebuddy-debug-last.json`                                                   |
+| 发版 / 改版本号   | `package.json` 的 `version`（唯一来源，见第 10.1 节）；改完必须重新 `npm run build`                            |
 
 ## 10. 约定与规范
 
@@ -188,6 +189,42 @@ cd /tmp && OPENAI_API_KEY=dummy codex exec --skip-git-repo-check --ephemeral -s 
 - 上游 JSON 请求用 `requestJson`（返回 `{status, headers, body, json}`），收 SSE 用 `requestRaw`（返回原始字符串）。
 - 全局状态只有 `session` 和 `sessionSource`，别再加散落全局。
 - 改完必跑 `node --check` + 上面第 8 节冒烟测试。
+
+### 10.1 版本号更新规则（改代码必读）
+
+**唯一来源是 `package.json` 的 `version` 字段**，不要在别处（前端、`core/config.js`、README 表格）再写一份版本号常量。运行时链路是：
+
+```
+package.json.version
+  → core/config.js 的 VERSION（require 读取，带 '1.0.0' 兜底）
+  → core/routes.js 的 GET /api/config 里的 runtime.version
+  → 管理页右上角 TopBar 的版本徽标 + /settings「运行时信息 · 版本」
+```
+
+启动日志也会打印 `服务已启动 (v<version>)`。
+
+**何时必须动版本号**（只增不减，遵循 [SemVer](https://semver.org/lang/zh-CN/)）：
+
+| 改动性质 | 版本位 | 例子 |
+| --- | --- | --- |
+| 破坏兼容：改接口路径 / 请求响应结构、删环境变量或配置项、改数据表结构导致旧库需迁移 | **MAJOR** | `/v1/responses` 字段改名 |
+| 新增功能且向后兼容：新端点、新模型、新环境变量/配置项、新页面 | **MINOR** | 新增 `/api/keys` 或管理页新页面 |
+| 修 bug、内部重构、纯文案/样式、依赖升级 | **PATCH** | 修复图片被压平成文本；加版本徽标 |
+
+**怎么改**（三处必须同步，缺一不可）：
+
+1. `package.json` 的 `version` 改成新值（**只改这一处版本号**）。
+2. 跑 `npm run build` 重新构建 `dist/`。
+   - ⚠️ 改 `web/` 下任何源码后**必须**重建：`core/build.js` 会比较 `web/` 与 `dist/` 的 mtime，不重建则管理页顶部出现「需要重新构建」告警，而**版本徽标读的是服务端 `runtime.version`，与 `dist/` 无关** —— 这就是「API 显示新版本、页面还是旧的」这类困惑的根源。
+   - 只改 `core/`（不动 `web/`）时可以跳过重建。
+3. 提交信息用 `chore: 发布 vX.Y.Z` 或把版本写进 `feat:` / `fix:` 主题里，方便回溯。
+
+**注意事项**：
+
+- 同一版本号下多次提交是允许的（开发过程中不必每提交都改版本）；**对外发布 / 部署到服务器时必须体现版本变化**，否则无法从管理页判断线上跑的是哪一版。
+- 改版本号**不需要**动数据库、环境变量或任何运行时配置；`VERSION` 是进程启动时读一次的，**必须重启服务才会生效**。
+- 不要为了「让页面显示新版本」而只改 `dist/` 里的产物或在前端写死版本号 —— 前端写死必然与服务端漂移。
+- 版本号与 `logs`、`session.json`、`proxy.db` 的存储格式无关；数据层的版本字段（如账号池 `version: 2`）是独立概念，别混用。
 
 ## 11. 安全注意
 

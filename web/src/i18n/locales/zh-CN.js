@@ -13,6 +13,7 @@ export default {
     settings: '系统配置',
     login: '登录',
     github: 'GitHub',
+    versionTitle: '当前服务版本（来自 package.json）',
   },
   common: {
     loading: '加载中…',

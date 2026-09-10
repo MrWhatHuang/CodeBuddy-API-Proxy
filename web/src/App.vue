@@ -14,6 +14,7 @@ const { t } = useI18n();
 const { data: config } = useRequest(() => api.config());
 
 const needsBuild = computed(() => !!config.value?.runtime?.build?.needsBuild);
+const appVersion = computed(() => config.value?.runtime?.version || '');
 const reload = () => window.location.reload();
 
 // 管理页鉴权门控：开启鉴权且未登录时跳转到登录页
@@ -83,7 +84,7 @@ const pageTitle = computed(() => {
         <div class="build-banner-code">npm install && npm run build</div>
         <button class="btn btn-primary btn-sm" @click="reload">{{ t('build.recheck') }}</button>
       </div>
-      <TopBar :title="pageTitle" />
+      <TopBar :title="pageTitle" :version="appVersion" />
       <main class="content">
         <router-view v-slot="{ Component }">
           <transition name="fade" mode="out-in">

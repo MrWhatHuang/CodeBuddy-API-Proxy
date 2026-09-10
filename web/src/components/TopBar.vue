@@ -4,7 +4,10 @@ import { useI18n } from 'vue-i18n';
 import { useSettings } from '@/stores/settings';
 import Icon from './Icon.vue';
 
-defineProps({ title: { type: String, default: '' } });
+defineProps({
+  title: { type: String, default: '' },
+  version: { type: String, default: '' },
+});
 
 const { t, locale } = useI18n();
 const { theme, setTheme, setLocale } = useSettings();
@@ -29,6 +32,7 @@ function toggleLocale() {
   <header class="topbar">
     <h1 class="title">{{ title }}</h1>
     <div class="actions">
+      <span v-if="version" class="version" :title="t('nav.versionTitle')">v{{ version }}</span>
       <a
         class="icon-btn"
         href="https://github.com/MrWhatHuang/CodeBuddy-API-Proxy"
@@ -96,9 +100,27 @@ function toggleLocale() {
   transition: all 0.15s ease;
 }
 .icon-btn:hover { background: var(--surface-2); border-color: var(--border-strong); }
+.version {
+  height: 34px;
+  padding: 0 11px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  letter-spacing: 0.01em;
+  user-select: none;
+  cursor: default;
+}
 @media (max-width: 820px) {
   .topbar { padding: 12px 16px; }
   .title { font-size: 16px; }
   .hide-sm { display: none; }
+  .version { display: none; }
 }
 </style>

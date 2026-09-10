@@ -13,6 +13,7 @@ export default {
     settings: 'Settings',
     login: 'Sign in',
     github: 'GitHub',
+    versionTitle: 'Running service version (from package.json)',
   },
   common: {
     loading: 'Loading…',
