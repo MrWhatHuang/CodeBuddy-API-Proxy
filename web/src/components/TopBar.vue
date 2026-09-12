@@ -42,6 +42,12 @@ const applying = ref(false);
 const applySteps = ref([]);
 const applyError = ref('');
 const applyDone = ref(false);
+// 服务端是否会自动重启（Linux/macOS），以及重启后的等待状态
+const canAutoRestart = ref(false);
+const restarting = ref(false);
+const restartTimedOut = ref(false);
+
+let restartTimer = null;
 
 const hasUpdate = computed(() => checkState.value === 'available');
 const latest = computed(() => (checkInfo.value && checkInfo.value.latest) || '');
@@ -95,16 +101,57 @@ async function doUpdate() {
   applyError.value = '';
   applySteps.value = [];
   applyDone.value = false;
+  restartTimedOut.value = false;
   try {
     const r = await api.applyUpdate();
     applySteps.value = (r && r.steps) || [];
     applyDone.value = true;
+    canAutoRestart.value = !!(r && r.canAutoRestart);
     checkState.value = 'uptodate';
+
+    // Linux/macOS：服务端会自行重启，这里轮询等待它起来后自动刷新页面
+    if (canAutoRestart.value) {
+      restarting.value = true;
+      waitForRestart();
+    }
   } catch (e) {
     applyError.value = (e && e.message) || String(e);
   } finally {
     applying.value = false;
   }
+}
+
+/**
+ * 轮询 /health 直到服务重新可用，然后自动刷新页面。
+ * 新进程需要一点时间启动，期间请求会失败——这是预期内的。
+ */
+function waitForRestart() {
+  const startedAt = Date.now();
+  const TIMEOUT_MS = 60000; // 最多等 60s
+  const INTERVAL_MS = 1000;
+
+  const tick = async () => {
+    if (Date.now() - startedAt > TIMEOUT_MS) {
+      restarting.value = false;
+      restartTimedOut.value = true;
+      return;
+    }
+    try {
+      // 加时间戳绕过缓存；只要拿到 200 就说明新进程已经在监听
+      const res = await fetch(`/health?t=${Date.now()}`, { cache: 'no-store' });
+      if (res.ok) {
+        // 等服务端完成初始化（登录态/调度器）再刷新，避免刚起来就跳转
+        setTimeout(() => window.location.reload(), 500);
+        return;
+      }
+    } catch {
+      // 服务正在重启，连接被拒是正常的，继续重试
+    }
+    restartTimer = setTimeout(tick, INTERVAL_MS);
+  };
+
+  // 先等一会再开始探测，给旧进程退出留时间，避免探到旧进程
+  restartTimer = setTimeout(tick, 1500);
 }
 
 function reloadPage() {
@@ -115,7 +162,10 @@ function onKeydown(e) {
   if (e.key === 'Escape' && panelOpen.value) closePanel();
 }
 onMounted(() => window.addEventListener('keydown', onKeydown));
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown);
+  if (restartTimer) clearTimeout(restartTimer);
+});
 </script>
 
 <template>
@@ -220,12 +270,22 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
           <div class="update-restart-title">
             <Icon name="check" :size="14" /> {{ t('update.doneTitle') }}
           </div>
-          <div class="update-restart-body">{{ t('update.restartRequired') }}</div>
+          <!-- Linux/macOS：服务端会自动重启，页面也会自动刷新 -->
+          <div v-if="canAutoRestart" class="update-restart-body">
+            {{ restartTimedOut ? t('update.restartTimeout') : t('update.autoRestarting') }}
+          </div>
+          <!-- Windows：需用户手动重启 -->
+          <div v-else class="update-restart-body">{{ t('update.manualRestart') }}</div>
         </div>
       </div>
 
       <div class="update-foot">
-        <template v-if="applyDone">
+        <!-- 自动重启中：不允许操作，等它起来会自动刷新 -->
+        <template v-if="restarting">
+          <span class="foot-hint">{{ t('update.restarting') }}</span>
+          <span class="spinner" aria-hidden="true"></span>
+        </template>
+        <template v-else-if="applyDone">
           <button class="btn btn-primary" @click="reloadPage">{{ t('update.reloadPage') }}</button>
         </template>
         <template v-else>
@@ -455,10 +515,22 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
 .update-foot {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 8px;
   padding: 12px 18px;
   border-top: 1px solid var(--border);
 }
+.foot-hint { font-size: 13px; color: var(--muted); margin-right: auto; }
+.spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--success, #2ea043);
+  animation: spin 0.7s linear infinite;
+  flex: none;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 820px) {
   .topbar { padding: 12px 16px; }

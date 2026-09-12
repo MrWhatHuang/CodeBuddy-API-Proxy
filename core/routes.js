@@ -28,6 +28,13 @@ const updater = require('./update');
 /** 自更新互斥标志：git pull + build 是重操作，禁止并发触发 */
 let updateInFlight = false;
 
+/**
+ * 当前 HTTP server 句柄。自更新需要重启进程时，必须先把它关掉以释放端口，
+ * 否则新进程会 EADDRINUSE。由 core/index.js 在 listen 后注入。
+ */
+let activeServer = null;
+function setActiveServer(server) { activeServer = server; }
+
 function accountPublic(acct) {
   if (!acct) return null;
   const a = acct.account || {};
@@ -307,11 +314,33 @@ async function route(req, res) {
     try {
       logger.log('info', 'system', '收到自更新请求，开始 git pull + 构建');
       const result = await updater.applyUpdate();
-      if (result.ok) {
-        util.sendJson(res, 200, result);
-      } else {
+      if (!result.ok) {
         const failed = result.steps.find((s) => !s.ok);
         util.sendJson(res, 400, { error: { message: (failed && failed.detail) || '更新失败' }, ...result });
+        return;
+      }
+
+      // 更新成功后按平台决定是否自动重启：
+      //   Linux/macOS —— 先把响应写回，再原地重启进程（用户无需操作）
+      //   Windows     —— 不自动重启（易产生孤儿进程 / 端口占用），由前端提示手动重启
+      const canRestart = updater.supportsAutoRestart();
+      result.canAutoRestart = canRestart;
+      result.restartRequired = true;
+      result.processPlatform = process.platform;
+
+      // 先结束响应，确保前端能收到 ok 与步骤信息，再重启（否则连接会被中断）
+      util.sendJson(res, 200, result);
+
+      if (canRestart) {
+        logger.log('info', 'system', '更新完成，准备自动重启服务');
+        // 留一点时间让上面的响应真正 flush 到客户端
+        setTimeout(() => {
+          updater.restartService({ server: activeServer }).catch((e) => {
+            logger.log('error', 'system', `自动重启失败: ${e.message}`);
+          });
+        }, 600);
+      } else {
+        logger.log('info', 'system', '更新完成，当前系统需手动重启服务才生效');
       }
     } catch (e) {
       logger.log('error', 'system', `自更新异常: ${e.message}`);
@@ -742,4 +771,4 @@ async function route(req, res) {
   util.sendJson(res, 404, { error: { message: `Not Found: ${method} ${pathname}` } });
 }
 
-module.exports = { route, statusObject };
+module.exports = { route, statusObject, setActiveServer };

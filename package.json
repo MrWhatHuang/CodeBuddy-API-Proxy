@@ -1,6 +1,6 @@
 {
   "name": "codebuddy-proxy",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "CodeBuddy API Proxy：把本地 CodeBuddy 登录态代理为 OpenAI 兼容接口，附 Vite+Vue 管理页",
   "license": "MIT",
   "author": "MrWhat",

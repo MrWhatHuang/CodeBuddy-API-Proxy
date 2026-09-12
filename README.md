@@ -368,7 +368,7 @@ sqlite3 ~/.codebuddy-proxy/proxy.db "DELETE FROM admin_users; DELETE FROM admin_
 | GET | `/api/usage` | 用量记录：按时间 / 账号 / 密钥 / 模型筛选、分页，含 token 汇总 |
 | GET | `/api/usage/stats?dimension=account|apiKey` | 按天聚合的 token 用量，供首页图表 |
 | GET | `/api/update/check` | 检查 GitHub 上的最新版本（只读，不修改任何文件） |
-| POST | `/api/update/apply` | 执行自更新：`git pull` → 按需 `npm install` → `npm run build` |
+| POST | `/api/update/apply` | 执行自更新：`git pull` → 按需 `npm install` → `npm run build`（Linux/macOS 随后自动重启） |
 
 ## 版本更新提示
 
@@ -378,6 +378,15 @@ sqlite3 ~/.codebuddy-proxy/proxy.db "DELETE FROM admin_users; DELETE FROM admin_
 - 点「立即更新」会依次执行 **`git pull` →（`package.json` 变化时）`npm install` → `npm run build`**，每步结果都显示在面板里。
 - 版本来源是 `raw.githubusercontent.com` 上 `main` 分支的 `package.json`（无需 token，也不受 GitHub API 限流影响）。可用 `CODEBUDDY_UPDATE_BRANCH` 换分支。
 
+### 更新后如何重启（按系统区分）
+
+| 系统 | 行为 |
+|---|---|
+| **Linux / macOS** | **自动重启**：服务端先 `close()` 释放端口，再以原 `argv`/`cwd` 拉起新进程（`detached` + `stdio: inherit`），随后旧进程退出。前端会轮询 `/health`，服务起来后**自动刷新页面**，全程无需操作。 |
+| **Windows** | **提示手动重启**：不自动重启（子进程易产生孤儿进程与端口占用 `EADDRINUSE`），面板会提示关闭进程后重新 `npm start`，并给出「刷新页面」按钮。 |
+
+自动重启最多等待 60 秒；超时会在面板里提示（服务可能启动失败），此时需手动检查。
+
 **安全约束**（`core/update.js`）：
 
 - **工作区有未提交改动时拒绝更新**，避免 `git pull` 覆盖你的本地修改；面板会提示先 `git stash` 或提交。
@@ -385,9 +394,11 @@ sqlite3 ~/.codebuddy-proxy/proxy.db "DELETE FROM admin_users; DELETE FROM admin_
 - 外部命令一律用 `execFile` + 参数数组（不拼 shell 字符串），避免命令注入。
 - 同一时刻只允许一个更新任务，并发请求返回 `409`。
 
-**更新后必须重启服务**：`git pull` 改的是磁盘上的 `core/*.js`，而进程里已加载的是旧代码，所以服务端改动要**重启**才生效（前端刷新页面即可）。面板在更新完成后会提示这一点。
+**为什么要重启**：`git pull` 改的是磁盘上的 `core/*.js`，而进程里已加载的仍是旧代码，所以服务端改动必须重启才生效。前端资源有新哈希、刷新即可，但服务端代码不行。重启方式见上面的系统对照表。
 
 > ⚠️ 该功能要求部署目录是一个**干净的 git 工作区**。若你是下载 zip 解压部署的（没有 `.git`），徽标仍会提示有新版本，但「立即更新」会禁用并给出手动命令。
+
+> ⚠️ 若用 `pm2` / `systemd` 等进程管理器托管，请确认其重启策略：自动重启出来的新进程可能与管理器失联，建议改用管理器自身的重启命令（如 `pm2 restart`），或在面板里关掉自动重启（Windows 行为即手动模式）。
 
 ## 用量统计
 

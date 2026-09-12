@@ -5,13 +5,14 @@
  *
  * - checkRemoteVersion()：从 GitHub 读取远端 package.json 的 version（只读，无副作用）
  * - applyUpdate()：git pull → npm install（仅依赖变化时）→ npm run build
+ * - restartService()：类 Unix 上原地重启进程；Windows 上拒绝并让用户手动重启
  *
  * 安全约束：
  *   1. 所有外部命令都用 execFile + 参数数组，绝不拼 shell 字符串（避免命令注入）。
  *   2. 只在「干净的 git 工作区」上执行 pull：有未提交改动时直接拒绝，
  *      避免把用户本地修改冲掉（这是自更新最危险的一步）。
- *   3. 不自动重启进程：core/ 的改动需要重启才生效，由用户手动重启，
- *      避免在 Windows 上产生孤儿进程 / 端口占用。
+ *   3. 重启只支持 Linux/macOS：Windows 上子进程与父进程的端口/句柄继承关系容易
+ *      产生孤儿进程与端口占用（EADDRINUSE），因此不自动重启，由用户手动重启。
  */
 
 const path = require('path');
@@ -242,9 +243,72 @@ async function applyUpdate() {
   };
 }
 
+/** 是否支持自动重启：仅 Linux / macOS */
+function supportsAutoRestart() {
+  return process.platform === 'linux' || process.platform === 'darwin';
+}
+
+/**
+ * 原地重启服务：spawn 一个新的 node 进程（继承原 argv/cwd/env），然后退出当前进程。
+ *
+ * 关键点：
+ *   - 用 detached + stdio:'inherit' 让新进程脱离当前进程组并接管原终端输出，
+ *     这样即使本进程随后退出，新进程也不会被一起带走。
+ *   - 必须先把 HTTP server 关掉再退出，否则新进程会 EADDRINUSE（端口还没释放）。
+ *   - 只在 Linux/macOS 上执行；Windows 直接返回 unsupported，由调用方提示用户手动重启。
+ *
+ * @param {object} opts
+ * @param {import('http').Server} [opts.server] 需要优雅关闭的 HTTP server
+ * @param {number} [opts.exitDelayMs] 关闭后延迟多久退出（给响应写回留时间）
+ * @returns {Promise<{ok:boolean, supported:boolean, reason?:string}>}
+ */
+async function restartService({ server, exitDelayMs = 800 } = {}) {
+  if (!supportsAutoRestart()) {
+    return { ok: false, supported: false, reason: '当前系统不支持自动重启，请手动重启服务' };
+  }
+
+  // 1) 先停掉监听，释放端口，避免新进程 EADDRINUSE
+  if (server && typeof server.close === 'function') {
+    await new Promise((resolve) => {
+      let done = false;
+      const finish = () => { if (!done) { done = true; resolve(); } };
+      try {
+        server.close(finish);
+      } catch { finish(); }
+      // 有 keep-alive 长连接时 close() 不会立刻回调，兜底 3s
+      setTimeout(finish, 3000).unref?.();
+    });
+  }
+
+  // 2) 拉起新进程：必须等到响应写回之后再退出，因此这里 spawn 后延迟退出
+  const { spawn } = require('child_process');
+  try {
+    const child = spawn(process.execPath, process.argv.slice(1), {
+      cwd: process.cwd(),
+      env: process.env,
+      detached: true,
+      stdio: 'inherit',
+    });
+    child.unref();
+    logger.log('info', 'system', `已拉起新进程 (pid ${child.pid})，当前进程即将退出`);
+
+    setTimeout(() => {
+      // 正常退出：新进程已在监听同一端口
+      process.exit(0);
+    }, exitDelayMs).unref?.();
+
+    return { ok: true, supported: true, pid: child.pid };
+  } catch (e) {
+    logger.log('error', 'system', `重启失败: ${e.message}`);
+    return { ok: false, supported: true, reason: e.message };
+  }
+}
+
 module.exports = {
   checkRemoteVersion,
   applyUpdate,
+  restartService,
+  supportsAutoRestart,
   compareVersion,
   parseVersion,
   readGitState,

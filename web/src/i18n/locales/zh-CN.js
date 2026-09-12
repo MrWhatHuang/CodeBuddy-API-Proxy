@@ -33,7 +33,10 @@ export default {
     updateNow: '立即更新',
     updating: '更新中…',
     doneTitle: '更新完成',
-    restartRequired: '代码已拉取并构建完成。服务端代码的改动需要重启服务才会生效（请关闭当前进程后重新 npm start）。前端页面可直接刷新。',
+    autoRestarting: '服务正在自动重启，完成后页面会自动刷新（无需操作）。',
+    restarting: '服务重启中…',
+    restartTimeout: '等待服务重启超时。请确认进程是否正常启动，然后手动刷新本页面。',
+    manualRestart: '代码已拉取并构建完成。当前系统（Windows）需要你手动重启服务：关闭正在运行的进程后重新执行 npm start。前端页面刷新即可。',
     reloadPage: '刷新页面',
   },
   common: {

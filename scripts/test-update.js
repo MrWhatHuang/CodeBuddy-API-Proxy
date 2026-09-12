@@ -98,6 +98,69 @@ async function check(name, fn) {
     }
   });
 
+  /* ---------------- 平台重启门控 ---------------- */
+
+  await check('supportsAutoRestart：仅 Linux/macOS 为 true', () => {
+    const expected = process.platform === 'linux' || process.platform === 'darwin';
+    assert.strictEqual(updater.supportsAutoRestart(), expected,
+      `platform=${process.platform} 时 supportsAutoRestart 应为 ${expected}`);
+  });
+
+  await check('restartService：Windows 上拒绝并给出原因（不 spawn）', async () => {
+    if (process.platform !== 'win32') return; // 仅在 Windows 断言该分支
+    const r = await updater.restartService({ server: null, exitDelayMs: 10 });
+    assert.strictEqual(r.ok, false, 'Windows 不得自动重启');
+    assert.strictEqual(r.supported, false);
+    assert.ok(r.reason && r.reason.length > 0, '应给出可展示的原因');
+  });
+
+  await check('restartService：类 Unix 上先 close(server) 再退出，且沿用 argv/cwd', async () => {
+    const fs = require('fs');
+    const os = require('os');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cbp-rs-'));
+    const marker = path.join(tmp, 'spawned.json');
+    const fakeServerJs = path.join(tmp, 'fake-server.js');
+    fs.writeFileSync(fakeServerJs, `
+      require('fs').writeFileSync(${JSON.stringify(marker)},
+        JSON.stringify({ argv: process.argv.slice(1), cwd: process.cwd() }));
+      setTimeout(() => {}, 2000);
+    `);
+
+    const realPlatform = process.platform;
+    const realArgv = process.argv;
+    const realExit = process.exit;
+    let exitCode = null;
+    let closed = false;
+
+    // 模拟 Linux + 把「新进程入口」指向假 server，避免真的重启本服务
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+    Object.defineProperty(process, 'argv', { value: [realArgv[0], fakeServerJs], configurable: true });
+    process.exit = (code) => { exitCode = code; };
+
+    try {
+      const r = await updater.restartService({
+        server: { close(cb) { closed = true; setImmediate(cb); } },
+        exitDelayMs: 250,
+      });
+      assert.strictEqual(r.ok, true, '应返回 ok');
+      assert.strictEqual(closed, true, '退出前必须先 close() 释放端口');
+
+      await new Promise((res) => setTimeout(res, 700));
+      assert.ok(fs.existsSync(marker), '应已拉起新进程');
+      const info = JSON.parse(fs.readFileSync(marker, 'utf8'));
+      assert.deepStrictEqual(info.argv, [fakeServerJs], '新进程应沿用原 argv');
+      assert.strictEqual(info.cwd, process.cwd(), '新进程应沿用原 cwd');
+
+      await new Promise((res) => setTimeout(res, 350));
+      assert.strictEqual(exitCode, 0, '应在延迟后以 0 退出');
+    } finally {
+      process.exit = realExit;
+      Object.defineProperty(process, 'platform', { value: realPlatform, configurable: true });
+      Object.defineProperty(process, 'argv', { value: realArgv, configurable: true });
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   console.log(`\n断言：${passed} 通过, ${failed} 失败`);
   process.exit(failed ? 1 : 0);
 })();

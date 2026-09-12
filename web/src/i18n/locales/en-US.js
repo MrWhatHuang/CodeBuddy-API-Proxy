@@ -33,7 +33,10 @@ export default {
     updateNow: 'Update now',
     updating: 'Updating…',
     doneTitle: 'Update complete',
-    restartRequired: 'Code pulled and rebuilt. Server-side changes require a restart to take effect (stop this process and run npm start again). The page itself can be reloaded now.',
+    autoRestarting: 'The service is restarting automatically. This page will reload by itself — no action needed.',
+    restarting: 'Restarting…',
+    restartTimeout: 'Timed out waiting for the service to restart. Check that the process started, then reload this page.',
+    manualRestart: 'Code pulled and rebuilt. On Windows you need to restart the service manually: stop the running process and run npm start again. The page itself can be reloaded now.',
     reloadPage: 'Reload page',
   },
   common: {

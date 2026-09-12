@@ -33,6 +33,9 @@ function start() {
     });
   });
 
+  // 把 server 句柄交给路由层：自更新自动重启前需要先 close() 释放端口
+  routes.setActiveServer(server);
+
   server.listen(config.PORT, config.HOST, () => {
     // 1) 先加载本地账号池（含旧 session.json 一次性迁移）；2) 其次优先同步 VSCode 插件登录态
     sessionMod.loadSession();
