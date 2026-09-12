@@ -7,6 +7,7 @@ const store = require('./store');
 const logger = require('./logger');
 const util = require('./util');
 const auth = require('./auth');
+const sessionMod = require('./session');
 // 仅用于复用请求体日志（logRequestBody 内部按配置判断是否写入，无循环依赖：
 // responses.js 引用 openai.js 的 aggregateSseToCompletion 是运行时延迟引用）
 const responses = require('./responses');
@@ -110,16 +111,19 @@ async function handleProxy(req, res, pathname) {
   const jsonBody = JSON.stringify(payload);
 
   const accountKey = auth.extractAccountKey(req, payload);
+  // 会话粘性：算出本请求属于哪个会话，让同一任务始终用同一账号
+  const sessionEnd = auth.isSessionEnd(req, payload);
+  const sessionKey = auth.extractSessionKey(req, payload, keyCheck.keyId || '', sessionEnd);
   let acct;
-  try { acct = await auth.pickAccountForRequest(accountKey, keyCheck.accountId || ''); }
+  try { acct = await auth.pickAccountForRequest(accountKey, keyCheck.accountId || '', { sessionKey }); }
   catch (e) {
     logger.log('warn', 'proxy', `${pathname} 拒绝: ${e.message}`, { pathname, model: payload.model });
     util.sendJson(res, 401, { error: { message: e.message, type: 'authentication_error' } });
     return true;
   }
 
-  const accountId = acct ? acct.id : '';
-  const accountName = acct ? (acct.name || (acct.account && (acct.account.nickname || acct.account.uid)) || '') : '';
+  let accountId = acct ? acct.id : '';
+  let accountName = acct ? (acct.name || (acct.account && (acct.account.nickname || acct.account.uid)) || '') : '';
 
   // 记录一次用量
   const record = (usage, status) => {
@@ -138,6 +142,30 @@ async function handleProxy(req, res, pathname) {
     });
   };
 
+  /**
+   * 上游返回错误时：标记账号不健康 + 尝试换号重试一次（失败转移）。
+   * 仅在「还未向客户端写任何数据」时才允许重试，否则只能原样透传。
+   * 成功后会把外层的 acct / accountId / accountName 更新为新账号。
+   * @returns {Promise<{acct: object}|null>} 换号成功返回新账号，否则 null
+   */
+  const tryFailover = async (status, bodyText) => {
+    if (!res.headersSent && auth.recordUpstreamFailure(accountId, status, bodyText)) {
+      try {
+        const next = await auth.pickFailoverAccount(accountId, sessionKey);
+        if (next) {
+          logger.log('warn', 'proxy', `${pathname} 换号重试: ${accountName} → ${next.name || next.id}`);
+          acct = next;                       // 同步更新，后续 buildAuthHeaders(acct) 才用新账号
+          accountId = next.id;
+          accountName = next.name || (next.account && (next.account.nickname || next.account.uid)) || '';
+          return { acct: next };
+        }
+      } catch (e2) {
+        logger.log('warn', 'proxy', `${pathname} 换号失败: ${e2.message}`);
+      }
+    }
+    return null;
+  };
+
   const headers = {
     ...auth.buildAuthHeaders(acct),
     'Content-Type': 'application/json',
@@ -151,11 +179,34 @@ async function handleProxy(req, res, pathname) {
       const r = await util.requestRaw(targetUrl, { method: 'POST', headers, body: jsonBody, timeoutMs });
       const ct = (r.headers && r.headers['content-type']) || '';
       if (ct.includes('text/event-stream') || r.body.includes('chat.completion.chunk')) {
+        auth.recordUpstreamSuccess(accountId);
         const completion = aggregateSseToCompletion(r.body);
         logger.log('info', 'proxy', `${pathname} 完成 (${Date.now() - startedAt}ms)`, logger.requestSummary(payload, { stream: false, status: 200, durationMs: Date.now() - startedAt, tokens: completion.usage && completion.usage.total_tokens }));
         record(completion.usage, 'ok');
         util.sendJson(res, 200, completion);
+      } else if (r.status !== 200 && await tryFailover(r.status, r.body)) {
+        // 换号重试（失败转移）：用新账号（acct 已被 tryFailover 更新）再发一次，仍按 SSE 聚合处理
+        const retryHeaders = {
+          ...auth.buildAuthHeaders(acct),
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+        };
+        const retry = await util.requestRaw(targetUrl, { method: 'POST', headers: retryHeaders, body: jsonBody, timeoutMs });
+        const rct = (retry.headers && retry.headers['content-type']) || '';
+        if (retry.status === 200 && (rct.includes('text/event-stream') || retry.body.includes('chat.completion.chunk'))) {
+          auth.recordUpstreamSuccess(accountId);
+          const completion = aggregateSseToCompletion(retry.body);
+          logger.log('info', 'proxy', `${pathname} 换号后完成 (${Date.now() - startedAt}ms)`, logger.requestSummary(payload, { stream: false, status: 200, durationMs: Date.now() - startedAt, tokens: completion.usage && completion.usage.total_tokens }));
+          record(completion.usage, 'ok');
+          util.sendJson(res, 200, completion);
+          return true;
+        }
+        auth.recordUpstreamFailure(accountId, retry.status, retry.body);
+        record(null, 'error');
+        res.writeHead(retry.status, { 'Content-Type': rct || 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.end(retry.body);
       } else {
+        if (r.status === 200) auth.recordUpstreamSuccess(accountId); else auth.recordUpstreamFailure(accountId, r.status, r.body);
         logger.log('warn', 'proxy', `${pathname} 上游非流式响应 ${r.status}`, logger.requestSummary(payload, { status: r.status, durationMs: Date.now() - startedAt }));
         record(null, r.status === 200 ? 'ok' : 'error');
         res.writeHead(r.status, { 'Content-Type': ct || 'application/json', 'Access-Control-Allow-Origin': '*' });
@@ -165,10 +216,33 @@ async function handleProxy(req, res, pathname) {
       await util.pipeSseToClient(res, targetUrl, {
         method: 'POST', headers, body: jsonBody,
         extraHeaders: { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' },
-      }, ({ usage, status }) => record(usage, status));
+      }, ({ usage, status, httpStatus, errorBody }) => {
+        // 流已开始写数据后无法重试，这里只做健康度记账
+        if (status === 'error' || (httpStatus && httpStatus !== 200)) {
+          auth.recordUpstreamFailure(accountId, httpStatus || 0, errorBody || '');
+        } else {
+          auth.recordUpstreamSuccess(accountId);
+        }
+        record(usage, status);
+      });
       logger.log('info', 'proxy', `${pathname} 流式结束 (${Date.now() - startedAt}ms)`, logger.requestSummary(payload, { stream: true, durationMs: Date.now() - startedAt }));
     } else {
       const r = await util.requestJson(targetUrl, { method: 'POST', headers, body: jsonBody, timeoutMs });
+      if (r.status === 200) auth.recordUpstreamSuccess(accountId);
+      else if (await tryFailover(r.status, r.body)) {
+        // acct 已被 tryFailover 换成新账号，用新账号重建请求头重试
+        const retryHeaders = { ...auth.buildAuthHeaders(acct), 'Content-Type': 'application/json', 'Accept': 'application/json' };
+        const retry = await util.requestJson(targetUrl, { method: 'POST', headers: retryHeaders, body: jsonBody, timeoutMs });
+        if (retry.status === 200) auth.recordUpstreamSuccess(accountId); else auth.recordUpstreamFailure(accountId, retry.status, retry.body);
+        logger.log('info', 'proxy', `${pathname} 换号后完成 (${Date.now() - startedAt}ms)`, logger.requestSummary(payload, { stream: false, status: retry.status, durationMs: Date.now() - startedAt }));
+        record(retry.json && retry.json.usage, retry.status === 200 ? 'ok' : 'error');
+        res.writeHead(retry.status, {
+          'Content-Type': (retry.headers && retry.headers['content-type']) || 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        });
+        res.end(retry.body);
+        return true;
+      }
       logger.log('info', 'proxy', `${pathname} 完成 (${Date.now() - startedAt}ms)`, logger.requestSummary(payload, { stream: false, status: r.status, durationMs: Date.now() - startedAt }));
       record(r.json && r.json.usage, r.status === 200 ? 'ok' : 'error');
       res.writeHead(r.status, {
@@ -182,6 +256,9 @@ async function handleProxy(req, res, pathname) {
     record(null, 'error');
     if (!res.headersSent) util.sendJson(res, 502, { error: { message: `upstream error: ${e.message}`, type: 'proxy_upstream_error' } });
     else res.end();
+  } finally {
+    // 会话结束：释放绑定，让下一个任务可以换账号
+    if (sessionKey && sessionEnd) sessionMod.releaseSession(sessionKey);
   }
   return true;
 }

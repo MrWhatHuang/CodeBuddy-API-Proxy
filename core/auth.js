@@ -73,12 +73,14 @@ async function getValidSession() {
 
 /**
  * 根据请求选择账号并校验。
- * 优先级：header/body 显式指定 > 关闭池模式（pinned 强制账号）> 密钥绑定账号 > 账号池。
+ * 优先级：header/body 显式指定 > 关闭池模式（pinned 强制账号）> 密钥绑定账号 > 账号池（含会话粘性）。
  * @param {string} [explicitKey] 来自 header/body 的显式账号指定
  * @param {string} [keyAccountId] API 密钥绑定的账号 id（空 = 未绑定）
+ * @param {object} [opts] { sessionKey } 会话指纹（为空则不做粘性）
  */
-async function pickAccountForRequest(explicitKey, keyAccountId) {
+async function pickAccountForRequest(explicitKey, keyAccountId, opts) {
   const pool = sessionMod.getPoolConfig();
+  const sessionKey = (opts && opts.sessionKey) || '';
   let acct = null;
   if (explicitKey) {
     acct = sessionMod.findAccountByIdOrName(explicitKey);
@@ -87,10 +89,30 @@ async function pickAccountForRequest(explicitKey, keyAccountId) {
   } else if (keyAccountId) {
     acct = sessionMod.findAccountByIdOrName(keyAccountId);
   } else {
-    acct = sessionMod.pickAccount(null);
+    acct = sessionMod.pickAccount(null, sessionKey);
   }
   if (!acct) throw new Error('未登录，请先打开管理页登录');
   const valid = await getValidAccount(acct);
+  sessionMod.markUsed(valid.id);
+  return valid;
+}
+
+/**
+ * 从上一次失败的账号换到另一个账号（失败转移）。
+ * 返回新账号或 null（无可换账号 / 未开启失败转移）。
+ * @param {string} failedAccountId 刚失败的账号 id
+ * @param {string} sessionKey 会话指纹；换号后会把绑定改到新账号
+ */
+async function pickFailoverAccount(failedAccountId, sessionKey) {
+  const pool = sessionMod.getPoolConfig();
+  if (!pool.failoverEnabled) return null;
+  // pinned / 密钥绑定场景下不换号，避免违背用户显式意图
+  if (pool.mode === 'pinned' && pool.pinnedId) return null;
+  const next = sessionMod.pickAccount(null, '');
+  if (!next || next.id === failedAccountId) return null;
+  const valid = await getValidAccount(next);
+  // 会话绑定改指新账号，后续请求继续跟着新账号走
+  if (sessionKey && pool.stickyEnabled) sessionMod.bindSession(sessionKey, valid.id);
   sessionMod.markUsed(valid.id);
   return valid;
 }
@@ -110,6 +132,38 @@ function extractAccountKey(req, payload) {
     }
   }
   return null;
+}
+
+/**
+ * 计算本次请求的会话指纹（用于会话粘性）。
+ * 见 sessionMod.computeSessionKey：X-Session-Id 头 > API 密钥 > 对话前缀指纹。
+ * @param {object} req HTTP 请求
+ * @param {object} payload 已解析的请求体（Responses 场景传转换后的 chat 结构）
+ * @param {string} apiKeyId 命中的 API 密钥 id
+ * @param {boolean} [sessionEnd] 客户端显式声明会话结束
+ */
+function extractSessionKey(req, payload, apiKeyId, sessionEnd) {
+  if (sessionEnd) return '';
+  const h = (req && req.headers) || {};
+  const headerSessionId = h['x-session-id'] || h['x-conversation-id'] || h['x-codebuddy-session'] || '';
+  const granularity = sessionMod.getPoolConfig().stickyGranularity || 'auto';
+  return sessionMod.computeSessionKey({
+    headerSessionId: headerSessionId ? String(headerSessionId).trim() : '',
+    apiKeyId: apiKeyId || '',
+    payload,
+    granularity,
+  });
+}
+
+/** 客户端是否显式声明「本次请求结束了一个会话」 */
+function isSessionEnd(req, payload) {
+  const h = (req && req.headers) || {};
+  const v = h['x-session-end'];
+  if (v === '1' || v === 'true') return true;
+  const b = payload && typeof payload === 'object' ? payload.sessionEnd : undefined;
+  if (b === true || b === 'true' || b === 1) return true;
+  if (payload && typeof payload === 'object' && payload.metadata && payload.metadata.sessionEnd === true) return true;
+  return false;
 }
 
 function buildAuthHeaders(acct) {
@@ -300,10 +354,52 @@ function verifyClientKey(req) {
   return { ok: true, keyId: matched.id, keyName: matched.name, accountId: matched.accountId || '' };
 }
 
+/**
+ * 记录一次上游失败，必要时把账号标记为不健康（冷却期内不再被选中）。
+ * 由 openai.js / responses.js 在收到上游错误响应后调用。
+ * @param {string} accountId
+ * @param {number} status HTTP 状态码
+ * @param {string} bodyText 响应体文本（用于识别额度类错误）
+ * @returns {boolean} 是否已标记为不健康
+ */
+function recordUpstreamFailure(accountId, status, bodyText) {
+  if (!accountId) return false;
+  const text = String(bodyText || '');
+  const lower = text.toLowerCase();
+
+  // 额度耗尽 / 配额不足：冷却较久，因为短期不会恢复
+  const quotaHit = /quota|insufficient|balance|credit|额度|积分不足|次数已用完|exceeded/.test(lower);
+  if (quotaHit) {
+    sessionMod.markUnhealthy(accountId, 30 * 60 * 1000, 'quota:' + (status || ''));
+    logger.log('warn', 'proxy', `账号额度不足，标记 ${accountId} 冷却 30 分钟`);
+    return true;
+  }
+  // 鉴权失败：可能 token 失效，短期冷却
+  if (status === 401 || status === 403) {
+    sessionMod.markUnhealthy(accountId, 5 * 60 * 1000, 'auth:' + status);
+    logger.log('warn', 'proxy', `账号鉴权失败(${status})，标记 ${accountId} 冷却 5 分钟`);
+    return true;
+  }
+  // 上游限流：短暂冷却
+  if (status === 429) {
+    sessionMod.markUnhealthy(accountId, 60 * 1000, 'rate-limit');
+    logger.log('warn', 'proxy', `账号被上游限流，标记 ${accountId} 冷却 1 分钟`);
+    return true;
+  }
+  return false;
+}
+
+/** 请求成功后清除账号的不健康标记 */
+function recordUpstreamSuccess(accountId) {
+  if (accountId) sessionMod.markHealthy(accountId);
+}
+
 module.exports = {
   buildNoAuthHeaders, buildAuthHeaders, authPath, isExpiring,
   refreshToken, getValidAccount, getValidSession,
-  pickAccountForRequest, extractAccountKey,
+  pickAccountForRequest, pickFailoverAccount, extractAccountKey,
+  extractSessionKey, isSessionEnd,
+  recordUpstreamFailure, recordUpstreamSuccess,
   verifyClientKey,
   fetchAuthState, pollAuthToken, fetchAccount, fetchAccounts, completeLogin,
   importByRefreshToken, fetchAccountByToken,

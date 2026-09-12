@@ -89,14 +89,24 @@ function accountsPayload() {
   const pool = sessionMod.getPoolConfig();
   const states = store.listCheckinStates();
   const autoCheckin = store.autoCheckinEnabled();
+  const unhealthyMap = {};
+  for (const u of sessionMod.listUnhealthy()) unhealthyMap[u.accountId] = u;
   const accounts = sessionMod.listAccounts().map(function (acct) {
     const pub = accountPublic(acct);
     const st = states[acct.id];
     pub.checkinLastDate = st ? st.lastDate : '';
     pub.checkinNextAt = st ? st.nextAt : 0;
+    // 账号健康度（内存态）：处于冷却期时前端展示原因与恢复时间
+    const u = unhealthyMap[acct.id];
+    pub.unhealthy = u ? { until: u.until, reason: u.reason } : null;
+    // 额度缓存（内存态，由调度器刷新）：供策略与前端展示
+    const q = sessionMod.getQuotaCache(acct.id);
+    pub.usageLeft = q ? q.usageLeft : null;
+    pub.usageTotal = q ? q.usageTotal : null;
+    pub.todayUsed = q ? q.todayUsed : null;
     return pub;
   });
-  return { pool, accounts, autoCheckin };
+  return { pool, accounts, autoCheckin, quotaReady: sessionMod.hasQuotaData() };
 }
 
 function parseBoolFlag(v) {
@@ -615,15 +625,53 @@ async function route(req, res) {
     try {
       const buf = await util.readBody(req);
       const body = buf.length ? JSON.parse(buf.toString('utf8')) : {};
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        util.sendJson(res, 400, { error: { message: '请求体必须是 JSON 对象' } });
+        return;
+      }
+      // 只透传白名单字段，具体校验在 sessionMod.setPoolConfig 内完成
+      const allowed = ['mode', 'strategy', 'pinnedId', 'stickyEnabled', 'stickyTtlMin',
+        'stickyGranularity', 'switchEnabled', 'switchIntervalMin', 'switchJitterMin',
+        'quotaRefreshMin', 'failoverEnabled'];
       const patch = {};
-      if (body.mode === 'pool' || body.mode === 'pinned') patch.mode = body.mode;
-      if (typeof body.strategy === 'string' && body.strategy) patch.strategy = body.strategy;
-      if (body.pinnedId !== undefined) patch.pinnedId = body.pinnedId || null;
+      for (const k of allowed) if (body[k] !== undefined) patch[k] = body[k];
+      if (!Object.keys(patch).length) {
+        util.sendJson(res, 400, { error: { message: '没有可更新的字段' } });
+        return;
+      }
       const pool = sessionMod.setPoolConfig(patch);
       logger.log('info', 'config', '账号池配置已更新', pool);
       util.sendJson(res, 200, pool);
     } catch (e) {
       util.sendJson(res, 400, { error: { message: '更新失败: ' + e.message } });
+    }
+    return;
+  }
+
+  /** 当前活跃的会话绑定（排查「为什么这个任务用了某个账号」用） */
+  if (pathname === '/api/pool/sessions' && method === 'GET') {
+    try {
+      const accounts = sessionMod.listAccounts();
+      const nameOf = {};
+      for (const a of accounts) nameOf[a.id] = a.name || (a.account && a.account.uid) || a.id;
+      const bindings = store.listSessionBindings().map(function (b) {
+        return {
+          sessionKey: b.sessionKey,
+          accountId: b.accountId,
+          accountName: nameOf[b.accountId] || '(已删除)',
+          boundAt: b.boundAt,
+          lastSeenAt: b.lastSeenAt,
+          reqCount: b.reqCount,
+        };
+      });
+      util.sendJson(res, 200, {
+        bindings,
+        unhealthy: sessionMod.listUnhealthy().map(function (u) {
+          return { accountId: u.accountId, accountName: nameOf[u.accountId] || u.accountId, until: u.until, reason: u.reason };
+        }),
+      });
+    } catch (e) {
+      util.sendJson(res, 500, { error: { message: e.message } });
     }
     return;
   }

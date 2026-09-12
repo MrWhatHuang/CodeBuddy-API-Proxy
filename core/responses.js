@@ -13,6 +13,7 @@ const logger = require('./logger');
 const util = require('./util');
 const auth = require('./auth');
 const openai = require('./openai');
+const sessionMod = require('./session');
 
 // CodeBuddy 后端的内容过滤器会拦截含 "Codex"/"OpenAI" 等竞品品牌词的系统提示词，
 // 返回 11128 "Illegal API invocation from an unapproved channel"。这里做净化以绕过。
@@ -586,7 +587,7 @@ function streamChatToResponses(clientRes, urlStr, headers, body, originalReq) {
             clientRes.write(`event: response.failed\ndata: ${JSON.stringify(ev)}\n\n`);
             clientRes.end();
           }
-          resolve({ usage: state.usage, model: state.model, status: upRes.statusCode === 200 ? 'ok' : 'error' });
+          resolve({ usage: state.usage, model: state.model, status: upRes.statusCode === 200 ? 'ok' : 'error', httpStatus: upRes.statusCode || 0, errorBody: errBody.slice(0, 4096) });
         });
         upRes.on('error', reject);
         return;
@@ -619,7 +620,7 @@ function streamChatToResponses(clientRes, urlStr, headers, body, originalReq) {
           }
         }
         finish();
-        resolve({ usage: state.usage, model: state.model, status: upRes.statusCode === 200 ? 'ok' : 'error' });
+        resolve({ usage: state.usage, model: state.model, status: upRes.statusCode === 200 ? 'ok' : 'error', httpStatus: upRes.statusCode || 0, errorBody: '' });
       });
       upRes.on('error', reject);
     });
@@ -728,16 +729,19 @@ async function handleResponses(req, res) {
   }
 
   const accountKey = auth.extractAccountKey(req, payload);
+  // 会话粘性：算出本请求属于哪个会话，让同一 agent 任务始终用同一账号
+  const sessionEnd = auth.isSessionEnd(req, payload);
+  const sessionKey = auth.extractSessionKey(req, chatPayload, keyCheck.keyId || '', sessionEnd);
   let acct;
-  try { acct = await auth.pickAccountForRequest(accountKey, keyCheck.accountId || ''); }
+  try { acct = await auth.pickAccountForRequest(accountKey, keyCheck.accountId || '', { sessionKey }); }
   catch (e) {
     logger.log('warn', 'responses', `拒绝: ${e.message}`);
     util.sendJson(res, 401, { error: { message: e.message, type: 'authentication_error' } });
     return;
   }
 
-  const accountId = acct ? acct.id : '';
-  const accountName = acct ? (acct.name || (acct.account && (acct.account.nickname || acct.account.uid)) || '') : '';
+  let accountId = acct ? acct.id : '';
+  let accountName = acct ? (acct.name || (acct.account && (acct.account.nickname || acct.account.uid)) || '') : '';
   const record = (usage, status) => {
     const cached =
       (usage && usage.prompt_cache_hit_tokens) ||
@@ -767,17 +771,54 @@ async function handleResponses(req, res) {
     if (payload.stream) {
       res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'Access-Control-Allow-Origin': '*', 'X-Accel-Buffering': 'no' });
       const done = await streamChatToResponses(res, targetUrl, headers, jsonBody, payload);
+      // 流式无法重试（已向客户端写数据），只做健康度记账
+      if (done && done.status && done.status !== 'ok') auth.recordUpstreamFailure(accountId, done.httpStatus || 0, done.errorBody || '');
+      else auth.recordUpstreamSuccess(accountId);
       logger.log('info', 'responses', `流式结束 (${Date.now() - startedAt}ms)`, logger.requestSummary(payload, { stream: true, durationMs: Date.now() - startedAt }));
       record(done && done.usage, (done && done.status) || 'ok');
     } else {
       const r = await util.requestRaw(targetUrl, { method: 'POST', headers, body: jsonBody, timeoutMs });
       const ct = (r.headers && r.headers['content-type']) || '';
       if (ct.includes('text/event-stream') || r.body.includes('chat.completion.chunk')) {
+        auth.recordUpstreamSuccess(accountId);
         const completion = openai.aggregateSseToCompletion(r.body);
         logger.log('info', 'responses', `完成 (${Date.now() - startedAt}ms)`, logger.requestSummary(payload, { stream: false, durationMs: Date.now() - startedAt, tokens: completion.usage && completion.usage.total_tokens }));
         record(completion.usage, 'ok');
         util.sendJson(res, 200, chatCompletionToResponse(completion, payload));
       } else {
+        // 失败转移：上游报错时换一个账号重试一次（此时还没向客户端写数据）
+        if (r.status !== 200 && auth.recordUpstreamFailure(accountId, r.status, r.body)) {
+          const pool = sessionMod.getPoolConfig();
+          if (pool.failoverEnabled && !(pool.mode === 'pinned' && pool.pinnedId)) {
+            try {
+              const next = await auth.pickFailoverAccount(accountId, sessionKey);
+              if (next) {
+                logger.log('warn', 'responses', `换号重试: ${accountName} → ${next.name || next.id}`);
+                acct = next;
+                accountId = next.id;
+                accountName = next.name || (next.account && (next.account.nickname || next.account.uid)) || '';
+                const retryHeaders = { ...auth.buildAuthHeaders(next), 'Content-Type': 'application/json', 'Accept': 'text/event-stream' };
+                const retry = await util.requestRaw(targetUrl, { method: 'POST', headers: retryHeaders, body: jsonBody, timeoutMs });
+                const rct = (retry.headers && retry.headers['content-type']) || '';
+                if (retry.status === 200 && (rct.includes('text/event-stream') || retry.body.includes('chat.completion.chunk'))) {
+                  auth.recordUpstreamSuccess(accountId);
+                  const completion = openai.aggregateSseToCompletion(retry.body);
+                  logger.log('info', 'responses', `换号后完成 (${Date.now() - startedAt}ms)`, logger.requestSummary(payload, { stream: false, status: 200, durationMs: Date.now() - startedAt }));
+                  record(completion.usage, 'ok');
+                  util.sendJson(res, 200, chatCompletionToResponse(completion, payload));
+                  return;
+                }
+                auth.recordUpstreamFailure(accountId, retry.status, retry.body);
+                record(null, 'error');
+                res.writeHead(retry.status, { 'Content-Type': rct || 'application/json', 'Access-Control-Allow-Origin': '*' });
+                res.end(retry.body);
+                return;
+              }
+            } catch (e2) {
+              logger.log('warn', 'responses', `换号失败: ${e2.message}`);
+            }
+          }
+        }
         record(null, r.status === 200 ? 'ok' : 'error');
         res.writeHead(r.status, { 'Content-Type': ct || 'application/json', 'Access-Control-Allow-Origin': '*' });
         res.end(r.body);
@@ -788,6 +829,9 @@ async function handleResponses(req, res) {
     record(null, 'error');
     if (!res.headersSent) util.sendJson(res, 502, { error: { message: `upstream error: ${e.message}`, type: 'proxy_upstream_error' } });
     else res.end();
+  } finally {
+    // 会话结束：释放绑定，让下一个任务可以换账号
+    if (sessionKey && sessionEnd) sessionMod.releaseSession(sessionKey);
   }
 }
 

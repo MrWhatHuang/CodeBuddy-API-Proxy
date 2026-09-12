@@ -8,13 +8,14 @@
 
 ## 核心特性
 
-1. **内置 OAuth 登录**：管理页「账号管理」里点「添加账号」即弹出浏览器完成 CodeBuddy OAuth 登录，支持添加多个账号组成**账号池**（轮询 / 指定账号两种消耗模式）。首次使用无需任何 VSCode 配置。
-2. **VSCode 登录态读取（可选）**：macOS 上可一键从 VSCode / Cursor 等插件的 SecretStorage 解密 CodeBuddy token 导入账号；也可粘贴 `refresh_token` 手工导入。
-3. **每日自动签到**：账号管理页顶部有全局「自动签到」开关（默认开启），服务端按北京时间每天在随机时间自动执行签到，错过窗口会补签。
-4. **管理页** `http://127.0.0.1:3800/home`：总览、账号、模型、日志、系统配置；中/英文；浅色 / 深色 / 跟随系统。
-5. **OpenAI 兼容**：`/v1/chat/completions`（流式 + 非流式自动聚合）、`/v1/completions`、`/v1/embeddings`。
-6. **Responses API**：`/v1/responses`，可接 Codex CLI。
-7. **SQLite 日志与配置**：写入 `~/.codebuddy-proxy/proxy.db`，可在管理页查询和改设置。
+1. **内置 OAuth 登录**：管理页「账号管理」里点「添加账号」即弹出浏览器完成 CodeBuddy OAuth 登录，支持添加多个账号组成**账号池**（轮询 / 额度加权 / 最省优先三种选号策略，可指定账号）。
+2. **会话粘性**：同一个任务（同一段对话）自始至终使用同一个账号，**不会跑到一半换号**，从而保住上游的上下文缓存。可选定时切换与失败转移。
+3. **VSCode 登录态读取（可选）**：macOS 上可一键从 VSCode / Cursor 等插件的 SecretStorage 解密 CodeBuddy token 导入账号；也可粘贴 `refresh_token` 手工导入。
+4. **每日自动签到**：账号管理页顶部有全局「自动签到」开关（默认开启），服务端按北京时间每天在随机时间自动执行签到，错过窗口会补签。
+5. **管理页** `http://127.0.0.1:3800/home`：总览、账号、模型、日志、系统配置；中/英文；浅色 / 深色 / 跟随系统。
+6. **OpenAI 兼容**：`/v1/chat/completions`（流式 + 非流式自动聚合）、`/v1/completions`、`/v1/embeddings`。
+7. **Responses API**：`/v1/responses`，可接 Codex CLI。
+8. **SQLite 日志与配置**：写入 `~/.codebuddy-proxy/proxy.db`，可在管理页查询和改设置。
 
 ## 运行
 
@@ -31,7 +32,7 @@ npm start              # node server.js，默认 http://127.0.0.1:3800
 | `npm start` | 启动代理；管理页来自 `dist/` |
 | `npm run build` | 构建管理页 |
 | `npm run dev` | 只起 Vite（`:5173`），API 代理到 `:3800`，需另开终端 `npm start` |
-| `npm test` | 语法检查（`server.js` + `core/**` 自动遍历）+ Responses 转换层 / 版本更新回归测试（`scripts/`） |
+| `npm test` | 语法检查（`server.js` + `core/**` 自动遍历）+ 账号池策略回归测试 + Responses 转换层 / 版本更新回归测试（`scripts/`） |
 
 启动后会自动打开管理页。关掉自动打开：
 
@@ -57,7 +58,7 @@ CODEBUDDY_NO_OPEN=1 npm start
 | 路径 | 页面 |
 |---|---|
 | `/home` | 总览：登录状态、代理地址、curl 示例、接口一览、Token 消耗趋势图（可按 OAuth 账号 / API 密钥维度切换） |
-| `/accounts` | 账号管理：OAuth 登录 / 从 VSCode 读取 / 手工导入、账号池模式、**顶部全局自动签到开关**、签到状态与积分余额 |
+| `/accounts` | 账号管理：OAuth 登录 / 从 VSCode 读取 / 手工导入、账号池策略（消耗模式 / 选号策略 / 会话粘性 / 定时切换 / 失败转移，均带 `?` 帮助）、**顶部全局自动签到开关**、签到状态与积分余额、账号冷却标记、活跃会话查看 |
 | `/apikeys` | API 密钥：新增 / 删除 / 重新生成多个密钥、校验开关 |
 | `/usage` | 使用记录：请求与 token 用量明细、按账号 / 密钥 / 模型筛选、CSV 导出 |
 | `/models` | 模型列表（浏览器访问为页面；`Accept: application/json` 时仍返回模型 JSON） |
@@ -95,6 +96,78 @@ CODEBUDDY_NO_OPEN=1 npm start
 - **今日消耗** = 当前已消耗积分（`usageUsed`）－ 今日 0 时快照的已消耗积分。
 - 若当天还没有快照（例如服务当天刚启动、尚未到 0 时），会以当前值作为当日基线写入，此时今日消耗记为 `0`，之后再查询即为「现在 － 今日 0 时基线」。
 
+## 账号池策略（会话粘性 / 选号 / 定时切换）
+
+账号管理页在「消耗模式」下方有一块策略配置区，每一项都带 `?` 帮助。四种能力：
+
+### 会话粘性（默认开启）
+
+**解决的问题**：上游 `/v2/chat/completions` 是无状态的，代理原先每个 HTTP 请求都轮询换号。而 Codex / Cursor 跑一个任务要发几十次请求，于是**每轮 tool call 都换一个账号**——每个账号各自维护 prompt cache，等于每次都是冷启动，缓存命中率接近 0，且同一段上下文从多个账号发出。
+
+开启粘性后，同一个任务**从始至终只用一个账号**，任务结束才释放。
+
+会话识别三级回退（上游不返回 session id，只能推断）：
+
+| 优先级 | 信号 | 说明 |
+|---|---|---|
+| 1 | `X-Session-Id` 请求头（也认 `X-Conversation-Id` / `X-CodeBuddy-Session`） | 客户端显式传则**权威生效**，最准 |
+| 2 | 对话前缀指纹 | **零配置**。取所有 `system`/`developer` 消息 + 首条 `user` 消息算 sha256。agent 多轮 tool loop 中这部分逐字不变，天然稳定 |
+| 3 | API 密钥 id | 兜底。一个客户端配一个密钥时，同密钥共用一个账号 |
+
+> ⚠️ 已知边界：若客户端把时间戳、当前目录等**每次都变**的内容写进 system 提示词，前缀指纹会不稳定，粘性失效。此时改用 `X-Session-Id`，或把「会话粒度」设为「按 API 密钥」。
+
+**会话何时结束**（决定何时可以换号）：
+
+- 客户端显式传 `X-Session-End: 1` 头或 body 里 `sessionEnd: true`；
+- 或者**绑定空闲超过「粘性有效期」**（默认 30 分钟）被自动清理。
+
+绑定持久化在 SQLite（`session_bindings` 表，**只存指纹 hash，不存消息原文**），所以服务重启后正在进行的任务不会丢粘性。
+
+### 选号策略
+
+| 策略 | 逻辑 | 依赖 |
+|---|---|---|
+| `round-robin`（默认） | 每个新会话依次分配到下一个账号 | 无 |
+| `quota-weighted` | 按剩余积分加权随机，剩余越多越容易被选中 | 积分余额 |
+| `least-used` | 选「今日消耗」最少的账号，一天下来最均匀 | 积分余额 |
+
+后两种依赖积分余额：服务端每 10 分钟（`quotaRefreshMin`）在后台刷新一次并缓存在**内存**，选号只读缓存，**绝不在请求热路径里发网络请求**。若拿不到积分数据，会自动退回 `round-robin` 并在管理页给出提示。
+
+### 定时切换（默认关闭）
+
+按固定间隔（默认 60 分钟 ±10 分钟随机抖动）把选号指针推进到下一个账号，让一天的额度消耗更均匀。
+
+**关键：切换只影响之后新建的会话，绝不打断正在进行的任务。** 已在运行的会话继续用原账号直到任务结束或空闲超时。所以效果是「新任务逐渐分散到不同账号」，而不是「跑到一半被抢走」。
+
+### 失败转移（默认开启）
+
+某个账号被上游拒绝时（token 失效 401/403、被限流 429、额度耗尽），代理会：
+
+1. 把它标记为**冷却中**（401/403 冷却 5 分钟、429 冷却 1 分钟、额度不足冷却 30 分钟），冷却期内选号跳过它；
+2. 对**本次请求**换一个账号重试一次。
+
+流式响应一旦已开始向客户端输出就无法重试，此时只做标记。管理页账号列表会给冷却中的账号打「冷却中」标记并显示原因与恢复时间。
+
+### 排查
+
+`GET /api/pool/sessions` 返回当前活跃的会话绑定（会话指纹 → 账号、请求数、最近活动）与处于冷却期的账号，用于排查「这个任务为什么用了某个账号」。管理页「活跃会话」按钮是它的图形入口。
+
+### 池配置字段
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `stickyEnabled` | `true` | 会话粘性开关 |
+| `stickyTtlMin` | `30` | 绑定空闲多久后释放（1–1440） |
+| `stickyGranularity` | `auto` | `auto` / `fingerprint` / `apikey` |
+| `strategy` | `round-robin` | `round-robin` / `quota-weighted` / `least-used` |
+| `switchEnabled` | `false` | 定时切换开关 |
+| `switchIntervalMin` | `60` | 切换间隔（1–1440） |
+| `switchJitterMin` | `10` | 间隔随机抖动（0–720） |
+| `quotaRefreshMin` | `10` | 额度缓存刷新间隔（1–1440） |
+| `failoverEnabled` | `true` | 失败转移开关 |
+
+以上字段都可用 `PUT /api/pool` 修改（带白名单与范围校验，非法值被忽略、超范围被夹取）。老库缺少这些字段时**自动补默认值，无需迁移**。
+
 ## 数据文件
 
 默认都在 `~/.codebuddy-proxy/`（可用 `CODEBUDDY_DATA_DIR` 覆盖）：
@@ -102,7 +175,7 @@ CODEBUDDY_NO_OPEN=1 npm start
 | 文件 | 说明 |
 |---|---|
 | `session.json` | OAuth / VSCode 登录态（权限 `0600`），含 `accessToken`、`refreshToken`、账号。也可用 `CODEBUDDY_SESSION_FILE` 单独指定 |
-| `proxy.db` | SQLite：`logs` 表 + `config` 表 + `models` 表（自定义模型）+ `api_keys` 表 + `usage` 表（用量统计）+ `accounts`/账号池 + `checkin_state`（自动签到状态）+ `credit_snapshots`（每日积分快照）。也可用 `CODEBUDDY_DB_FILE` 单独指定 |
+| `proxy.db` | SQLite：`logs` 表 + `config` 表 + `models` 表（自定义模型）+ `api_keys` 表 + `usage` 表（用量统计）+ `accounts`/账号池 + `checkin_state`（自动签到状态）+ `credit_snapshots`（每日积分快照）+ `session_bindings`（会话粘性绑定，只存指纹 hash）。也可用 `CODEBUDDY_DB_FILE` 单独指定 |
 
 账号登录态的优先级（多种方式，取其一即可）：
 
@@ -133,6 +206,31 @@ curl http://127.0.0.1:3800/v1/chat/completions \
 ```
 
 把其它工具的 `base_url` 指向 `http://127.0.0.1:3800/v1`。
+
+### 会话粘性相关请求头（可选）
+
+代理会自动用「对话前缀指纹」推断会话，通常**无需任何配置**。你的客户端若满足以下任一情况，可显式传头以获得更准的粘性：
+
+```bash
+# 多任务并发、或 system 提示词里含每次都变的内容（时间戳 / cwd）
+curl http://127.0.0.1:3800/v1/chat/completions \
+  -H "X-Session-Id: my-task-001" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"default","messages":[{"role":"user","content":"你好"}]}'
+
+# 任务明确结束时，告诉代理可以释放账号绑定（下一个任务就能换号）
+curl http://127.0.0.1:3800/v1/chat/completions \
+  -H "X-Session-Id: my-task-001" \
+  -H "X-Session-End: 1" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"default","messages":[{"role":"user","content":"结束了"}]}'
+```
+
+| 请求头 | 说明 |
+|---|---|
+| `X-Session-Id`（或 `X-Conversation-Id` / `X-CodeBuddy-Session`） | 显式指定会话 id，**优先级最高**，同一个 id 的请求固定用同一个账号 |
+| `X-Session-End: 1` | 声明本次请求结束了一个会话，代理随即释放该会话的账号绑定 |
+| `X-CodeBuddy-Account`（或 `X-Account-Id` / `X-Account-Name`） | 显式指定本次请求用哪个账号（优先级高于会话粘性与池策略，且不写入绑定） |
 
 ## 接 Codex CLI（Responses API）
 
@@ -338,13 +436,16 @@ sqlite3 ~/.codebuddy-proxy/proxy.db "DELETE FROM admin_users; DELETE FROM admin_
 | DELETE | `/api/logs` | 清空日志 |
 | GET | `/api/stats` | 日志统计 |
 | GET | `/api/import-vscode` | 从 VSCode 重读登录态 |
-| GET | `/api/accounts` | 账号池列表 + 池配置 + 全局 `autoCheckin` 开关 |
+| GET | `/api/accounts` | 账号池列表 + 池配置 + 全局 `autoCheckin` 开关 + 各账号健康度/额度缓存（`quotaReady` 表示额度数据是否可用） |
 | PUT | `/api/accounts` | 全局自动签到开关（body `{ autoCheckin }`） |
 | PUT | `/api/accounts/:id` | 重命名（body `{ name }`） |
 | POST | `/api/accounts/login` | 发起 OAuth 登录，返回 `authUrl` |
 | GET | `/api/accounts/login/status` | 查询 OAuth 登录进度 |
 | POST | `/api/accounts/import` | 用 refresh_token 手工导入账号 |
-| DELETE | `/api/accounts/:id` | 删除账号 |
+| DELETE | `/api/accounts/:id` | 删除账号（同时清理其签到状态、积分快照与会话绑定） |
+| GET | `/api/pool` | 读取账号池配置（含粘性/策略/定时切换/失败转移字段） |
+| PUT | `/api/pool` | 更新账号池配置（白名单 + 范围校验） |
+| GET | `/api/pool/sessions` | 当前活跃的会话绑定 + 处于冷却期的账号（排查用） |
 | GET | `/api/checkin/status` | 查询签到状态（可指定 `accountId`） |
 | POST | `/api/checkin` | 执行签到（可指定 `accountId`） |
 | GET | `/api/credits` | 查询积分余额（可指定 `accountId`） |
@@ -454,7 +555,8 @@ core/              服务端
   config.js        环境变量 / 默认值
   store.js         SQLite 日志 + 系统配置 + 账号池 + 签到状态
   logger.js        统一日志
-  session.js       登录态 / 账号池
+  session.js       登录态 / 账号池 / 会话粘性 / 选号策略 / 账号健康度
+  sessionScheduler.js  账号池调度（定时切换 + 额度缓存刷新 + 绑定清理）
   auth.js          OAuth / token 刷新
   vscode.js        从 VSCode 解密登录态
   checkin.js       每日签到（查询 / 执行）
@@ -471,6 +573,7 @@ web/               管理页源码（Vite + Vue）
 dist/              管理页构建产物
 scripts/           校验脚本
   check-all.js     语法检查（server.js + core/ 遍历）
+  test-account-pool.js  账号池策略回归测试（会话粘性 / 定时切换 / 健康度 / 选号）
   test-responses.js  Responses 转换层回归测试
   test-update.js   版本比较与自更新护栏测试
 ```

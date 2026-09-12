@@ -9,10 +9,16 @@ const router = useRouter();
 
 const accounts = ref([]);
 const pool = ref({ mode: 'pool', strategy: 'round-robin', pinnedId: null });
+const quotaReady = ref(true);
 const autoCheckin = ref(true);
 const autoCheckinSaving = ref(false);
 const loading = ref(false);
 const notice = ref('');
+const poolSaving = ref(false);
+const showSessions = ref(false);
+const sessions = ref([]);
+const sessionsUnhealthy = ref([]);
+const sessionsLoading = ref(false);
 const showAdd = ref(false);
 const newName = ref('');
 const showImport = ref(false);
@@ -46,6 +52,7 @@ async function load() {
     const r = await api.listAccounts();
     accounts.value = r.accounts || [];
     pool.value = r.pool || { mode: 'pool', strategy: 'round-robin', pinnedId: null };
+    quotaReady.value = r.quotaReady !== false;
     autoCheckin.value = r.autoCheckin !== false;
   } catch (e) {
     notice.value = t('common.error') + ': ' + e.message;
@@ -175,6 +182,74 @@ async function pin(id) {
   } catch (e) {
     notice.value = t('common.error') + ': ' + e.message;
   }
+}
+
+/** 更新账号池策略配置（策略 / 粘性 / 定时切换 / 失败转移） */
+async function setPoolField(patch) {
+  if (poolSaving.value) return;
+  poolSaving.value = true;
+  const prev = { ...pool.value };
+  try {
+    const r = await api.setPool(patch);
+    pool.value = r;
+    notice.value = '';
+  } catch (e) {
+    pool.value = prev;   // 失败回滚，避免 UI 与服务端不一致
+    notice.value = t('common.error') + ': ' + e.message;
+  } finally {
+    poolSaving.value = false;
+  }
+}
+
+/** 数字输入：失焦时提交（空值 / 非法值回退为服务端当前值） */
+function setPoolNumber(field, ev) {
+  const raw = ev.target.value;
+  if (raw === '' || raw == null) { ev.target.value = pool.value[field]; return; }
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n === pool.value[field]) { ev.target.value = pool.value[field]; return; }
+  setPoolField({ [field]: n });
+}
+
+/** 策略依赖积分数据；拿不到数据时服务端会退回轮询，这里给出提示 */
+const strategyDegraded = computed(() => {
+  const s = pool.value.strategy;
+  return (s === 'quota-weighted' || s === 'least-used') && quotaReady.value === false;
+});
+
+/** 打开活跃会话面板，查看「哪些任务被粘在哪个账号上」 */
+async function openSessions() {
+  showSessions.value = true;
+  sessionsLoading.value = true;
+  try {
+    const r = await api.poolSessions();
+    sessions.value = r.bindings || [];
+    sessionsUnhealthy.value = r.unhealthy || [];
+  } catch (e) {
+    notice.value = t('common.error') + ': ' + e.message;
+    sessions.value = [];
+    sessionsUnhealthy.value = [];
+  } finally {
+    sessionsLoading.value = false;
+  }
+}
+
+/** 账号是否处于冷却期（服务端返回的内存态） */
+function isUnhealthy(a) {
+  return !!(a && a.unhealthy && a.unhealthy.until > Date.now());
+}
+
+/** 冷却原因转成可读文案 */
+function unhealthyText(a) {
+  const u = a && a.unhealthy;
+  if (!u) return '';
+  const r = String(u.reason || '');
+  let label = '';
+  if (r.startsWith('quota')) label = t('accounts.unhealthyReasonQuota');
+  else if (r.startsWith('auth')) label = t('accounts.unhealthyReasonAuth');
+  else if (r.startsWith('rate')) label = t('accounts.unhealthyReasonRate');
+  else label = r;
+  const until = fmtTime(u.until);
+  return label + ' · ' + t('accounts.unhealthyUntil', { time: until });
 }
 
 async function openAdd() {
@@ -376,6 +451,116 @@ load();
 
       <p v-if="notice" class="hint notice">{{ notice }}</p>
 
+      <!-- 账号池策略：仅在池模式下有意义（指定账号模式完全绕过池） -->
+      <div v-if="pool.mode !== 'pinned'" class="strategy-panel">
+        <div class="strategy-row">
+          <span class="mode-label">
+            {{ t('accounts.strategy') }}
+            <span class="tip">
+              <span class="tip-icon">?</span>
+              <span class="tip-text">{{ t('accounts.strategyHint') }}</span>
+            </span>
+          </span>
+          <select class="input select-sm" :value="pool.strategy" :disabled="poolSaving" @change="setPoolField({ strategy: $event.target.value })">
+            <option value="round-robin">{{ t('accounts.strategyRoundRobin') }}</option>
+            <option value="quota-weighted">{{ t('accounts.strategyQuotaWeighted') }}</option>
+            <option value="least-used">{{ t('accounts.strategyLeastUsed') }}</option>
+          </select>
+
+          <span class="mode-label">
+            {{ t('accounts.sticky') }}
+            <span class="tip">
+              <span class="tip-icon">?</span>
+              <span class="tip-text">{{ t('accounts.stickyHint') }}</span>
+            </span>
+          </span>
+          <label class="switch">
+            <input type="checkbox" :checked="pool.stickyEnabled" :disabled="poolSaving" @change="setPoolField({ stickyEnabled: $event.target.checked })" />
+            <span class="slider"></span>
+          </label>
+
+          <template v-if="pool.stickyEnabled">
+            <span class="mode-label">
+              {{ t('accounts.stickyTtl') }}
+              <span class="tip">
+                <span class="tip-icon">?</span>
+                <span class="tip-text">{{ t('accounts.stickyTtlHint') }}</span>
+              </span>
+            </span>
+            <input class="input input-num" type="number" min="1" max="1440" :value="pool.stickyTtlMin" :disabled="poolSaving" @change="setPoolNumber('stickyTtlMin', $event)" />
+            <span class="unit">{{ t('accounts.stickyTtlUnit') }}</span>
+
+            <span class="mode-label">
+              {{ t('accounts.stickyGranularity') }}
+              <span class="tip">
+                <span class="tip-icon">?</span>
+                <span class="tip-text">{{ t('accounts.granularityHint') }}</span>
+              </span>
+            </span>
+            <select class="input select-sm" :value="pool.stickyGranularity" :disabled="poolSaving" @change="setPoolField({ stickyGranularity: $event.target.value })">
+              <option value="auto">{{ t('accounts.granularityAuto') }}</option>
+              <option value="fingerprint">{{ t('accounts.granularityFingerprint') }}</option>
+              <option value="apikey">{{ t('accounts.granularityApikey') }}</option>
+            </select>
+          </template>
+        </div>
+
+        <div class="strategy-row">
+          <span class="mode-label">
+            {{ t('accounts.switchEnabled') }}
+            <span class="tip">
+              <span class="tip-icon">?</span>
+              <span class="tip-text">{{ t('accounts.switchHint') }}</span>
+            </span>
+          </span>
+          <label class="switch">
+            <input type="checkbox" :checked="pool.switchEnabled" :disabled="poolSaving" @change="setPoolField({ switchEnabled: $event.target.checked })" />
+            <span class="slider"></span>
+          </label>
+
+          <template v-if="pool.switchEnabled">
+            <span class="mode-label">
+              {{ t('accounts.switchInterval') }}
+              <span class="tip">
+                <span class="tip-icon">?</span>
+                <span class="tip-text">{{ t('accounts.switchIntervalHint') }}</span>
+              </span>
+            </span>
+            <input class="input input-num" type="number" min="1" max="1440" :value="pool.switchIntervalMin" :disabled="poolSaving" @change="setPoolNumber('switchIntervalMin', $event)" />
+            <span class="unit">{{ t('accounts.stickyTtlUnit') }}</span>
+
+            <span class="mode-label">{{ t('accounts.switchJitter') }}</span>
+            <input class="input input-num" type="number" min="0" max="720" :value="pool.switchJitterMin" :disabled="poolSaving" @change="setPoolNumber('switchJitterMin', $event)" />
+            <span class="unit">{{ t('accounts.switchJitterUnit') }}</span>
+          </template>
+
+          <span class="mode-spacer"></span>
+
+          <span class="mode-label">
+            {{ t('accounts.failover') }}
+            <span class="tip">
+              <span class="tip-icon">?</span>
+              <span class="tip-text">{{ t('accounts.failoverHint') }}</span>
+            </span>
+          </span>
+          <label class="switch">
+            <input type="checkbox" :checked="pool.failoverEnabled" :disabled="poolSaving" @change="setPoolField({ failoverEnabled: $event.target.checked })" />
+            <span class="slider"></span>
+          </label>
+
+          <span class="mode-label">
+            {{ t('accounts.activeSessions') }}
+            <span class="tip">
+              <span class="tip-icon">?</span>
+              <span class="tip-text">{{ t('accounts.activeSessionsHint') }}</span>
+            </span>
+          </span>
+          <button class="btn btn-ghost btn-sm" @click="openSessions">{{ t('accounts.activeSessions') }}</button>
+        </div>
+
+        <p v-if="strategyDegraded" class="hint warn-text">{{ t('accounts.strategyQuotaDegraded') }}</p>
+      </div>
+
       <div v-if="loading" class="muted">{{ t('common.loading') }}</div>
       <div v-else-if="!accounts.length" class="muted">{{ t('accounts.empty') }}</div>
 
@@ -398,7 +583,9 @@ load();
             <tr v-for="a in accounts" :key="a.id" :class="{ pinned: pool.mode === 'pinned' && pool.pinnedId === a.id }">
               <td class="strong">
                 <span v-if="pool.mode === 'pinned' && pool.pinnedId === a.id" class="badge badge-primary">{{ t('accounts.pinnedBadge') }}</span>
+                <span v-if="isUnhealthy(a)" class="badge badge-warn" :title="unhealthyText(a)">{{ t('accounts.unhealthyBadge') }}</span>
                 {{ a.name || '-' }}
+                <div v-if="isUnhealthy(a)" class="unhealthy-note">{{ unhealthyText(a) }}</div>
               </td>
               <td>{{ a.nickname || '-' }}</td>
               <td><code>{{ a.uid || '-' }}</code></td>
@@ -466,6 +653,35 @@ load();
         <button class="btn btn-ghost" @click="showVscode = false">{{ t('common.cancel') }}</button>
       </div>
     </div>
+
+    <!-- 活跃会话：查看当前被粘性固定到各账号的任务 -->
+    <div v-if="showSessions" class="card add-card">
+      <h3 class="card-title">{{ t('accounts.activeSessions') }}</h3>
+      <p class="hint">{{ t('accounts.activeSessionsHint') }}</p>
+      <div v-if="sessionsLoading" class="muted">{{ t('common.loading') }}</div>
+      <div v-else-if="!sessions.length" class="muted">{{ t('accounts.sessionsEmpty') }}</div>
+      <div v-else class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>{{ t('accounts.colSessionAccount') }}</th>
+              <th>{{ t('accounts.colSessionReqCount') }}</th>
+              <th>{{ t('accounts.colSessionLastSeen') }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="s in sessions" :key="s.sessionKey">
+              <td class="strong">{{ s.accountName }}</td>
+              <td class="muted">{{ s.reqCount }}</td>
+              <td class="muted">{{ fmt(s.lastSeenAt) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="actions">
+        <button class="btn btn-ghost" @click="showSessions = false">{{ t('accounts.sessionsClose') }}</button>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -479,6 +695,23 @@ load();
 .radio input { margin: 0; }
 .hint { font-size: 12px; }
 .notice { margin-top: 10px; }
+.warn-text { color: var(--warning, #d29922); }
+
+/* 账号池策略面板 */
+.strategy-panel {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.strategy-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.strategy-row + .strategy-row { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border); }
+.select-sm { width: auto; min-width: 132px; padding: 4px 8px; font-size: 13px; }
+.input-num { width: 72px; padding: 4px 8px; font-size: 13px; }
+.unit { font-size: 12px; color: var(--text-2); }
+.badge-warn { background: var(--warning-soft, rgba(210, 153, 34, 0.16)); color: var(--warning, #d29922); }
+.unhealthy-note { font-size: 11px; font-weight: 400; color: var(--warning, #d29922); margin-top: 2px; }
 
 .tip { position: relative; display: inline-flex; margin-left: 4px; vertical-align: middle; }
 .tip-icon {

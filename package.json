@@ -11,7 +11,7 @@
     "dev": "vite --config web/vite.config.mjs",
     "build": "vite build --config web/vite.config.mjs",
     "preview": "vite preview --config web/vite.config.mjs",
-    "test": "node scripts/check-all.js && node scripts/test-responses.js && node scripts/test-update.js"
+    "test": "node scripts/check-all.js && node scripts/test-account-pool.js && node scripts/test-responses.js && node scripts/test-update.js"
   },
   "engines": {
     "node": ">=22.5.0"
