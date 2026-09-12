@@ -188,7 +188,7 @@ cd /tmp && OPENAI_API_KEY=dummy codex exec --skip-git-repo-check --ephemeral -s 
 - 日志统一 `log(level, msg)`（level：info/warn/error）。
 - 上游 JSON 请求用 `requestJson`（返回 `{status, headers, body, json}`），收 SSE 用 `requestRaw`（返回原始字符串）。
 - 全局状态只有 `session` 和 `sessionSource`，别再加散落全局。
-- 改完必跑 `node --check` + 上面第 8 节冒烟测试。
+- 改完必跑 `node --check` + 上面第 8 节冒烟测试；提交前按第 10.1 节的清单确认**版本号**是否该动（**新增配置项/端点即使写在 `fix:` 里也要升 MINOR**）。
 
 ### 10.1 版本号更新规则（改代码必读）
 
@@ -210,6 +210,34 @@ package.json.version
 | 破坏兼容：改接口路径 / 请求响应结构、删环境变量或配置项、改数据表结构导致旧库需迁移 | **MAJOR** | `/v1/responses` 字段改名 |
 | 新增功能且向后兼容：新端点、新模型、新环境变量/配置项、新页面 | **MINOR** | 新增 `/api/keys` 或管理页新页面 |
 | 修 bug、内部重构、纯文案/样式、依赖升级 | **PATCH** | 修复图片被压平成文本；加版本徽标 |
+
+#### ✅ 提交前必查：这次改动要不要动版本号？
+
+**先跑一遍这个清单**，任何一条命中就必须升版本（多条命中取最高的那一档）：
+
+```bash
+# 1) 有没有新增/删除配置项或环境变量？（MINOR / MAJOR）
+git diff HEAD~1 -- core/config.js | grep -E "^[+-]\s*'[a-zA-Z.]+':"
+
+# 2) 有没有新增端点或路由？（MINOR）
+git diff HEAD~1 -- core/routes.js core/openai.js | grep -E "^\+.*(pathname ===|UPSTREAM_MAP)"
+
+# 3) 有没有改请求/响应结构或数据表结构？（MAJOR）
+git diff HEAD~1 -- core/store.js core/responses.js | grep -E "^\+.*(CREATE TABLE|ALTER TABLE|schema)"
+
+# 4) 只是修 bug / 重构 / 文案？（PATCH）
+git diff HEAD~1 --stat
+```
+
+**典型误判（真实踩过，务必避开）**：
+
+- ❌ **「只是修 bug，所以不用动版本」——错。** 如果一个 `fix:` 提交**顺带**加了新配置项、新端点或新页面，那它就是 **MINOR**，不是 PATCH。按主题词（`fix:`→PATCH）判断是这个规则最容易失效的地方：**版本位由「改动内容」决定，不由 commit 前缀决定**。
+  - 实例：`fix: 修复 Responses 流式 output_index…` 同时新增了 `logging.requestBody` / `logging.requestBodyMaxKb` 两个配置项，按表应为 **MINOR**（1.1.1 → 1.2.0），而不是停在 1.1.1。
+- ❌ **「改动很小，不值得升版本」——错。** 只要能被用户观察到（行为修复、配置项、界面文案），就该有版本痕迹。
+- ❌ **「等发版时再一起升」——仅限本地开发期。** 一旦推到远端 / 部署到服务器，必须已经在版本号上体现，否则无法从管理页判断线上跑的是哪一版。
+- ✅ 「同一版本号下多次提交」是允许的：开发中途可以攒着，**但推送到远端或部署前必须补上**。
+
+**判断不准时**：宁可升 MINOR（多升一档的代价远小于「修了 bug 但线上看不出是哪版」）。
 
 **怎么改**（三处必须同步，缺一不可）：
 
