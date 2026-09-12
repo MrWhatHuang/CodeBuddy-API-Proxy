@@ -21,8 +21,12 @@ const checkin = require('./checkin');
 const checkinScheduler = require('./checkinScheduler');
 const credits = require('./credits');
 const adminAuth = require('./adminAuth');
+const updater = require('./update');
 
 /* ============================ 状态对象 ============================ */
+
+/** 自更新互斥标志：git pull + build 是重操作，禁止并发触发 */
+let updateInFlight = false;
 
 function accountPublic(acct) {
   if (!acct) return null;
@@ -284,6 +288,36 @@ async function route(req, res) {
       util.sendJson(res, 200, configResponse());
     } catch (e) {
       util.sendJson(res, 400, { error: { message: `配置更新失败: ${e.message}` } });
+    }
+    return;
+  }
+
+  /* ---- 版本检查 / 自更新 ---- */
+  // 只读检查，可被前端轮询；apply 会真的改磁盘，用互斥锁避免并发触发
+  if (pathname === '/api/update/check' && method === 'GET') {
+    util.sendJson(res, 200, await updater.checkRemoteVersion());
+    return;
+  }
+  if (pathname === '/api/update/apply' && method === 'POST') {
+    if (updateInFlight) {
+      util.sendJson(res, 409, { error: { message: '已有更新正在进行，请稍候' } });
+      return;
+    }
+    updateInFlight = true;
+    try {
+      logger.log('info', 'system', '收到自更新请求，开始 git pull + 构建');
+      const result = await updater.applyUpdate();
+      if (result.ok) {
+        util.sendJson(res, 200, result);
+      } else {
+        const failed = result.steps.find((s) => !s.ok);
+        util.sendJson(res, 400, { error: { message: (failed && failed.detail) || '更新失败' }, ...result });
+      }
+    } catch (e) {
+      logger.log('error', 'system', `自更新异常: ${e.message}`);
+      util.sendJson(res, 500, { error: { message: `更新异常: ${e.message}` } });
+    } finally {
+      updateInFlight = false;
     }
     return;
   }

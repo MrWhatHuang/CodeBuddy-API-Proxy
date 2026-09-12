@@ -73,6 +73,10 @@ export const api = {
   dailyCheckin: (accountId) => alova.Post('/api/checkin', { accountId }),
   credits: (accountId) => alova.Get(withQuery('/api/credits', { accountId })),
 
+  // 版本检查 / 自更新
+  checkUpdate: () => alova.Get('/api/update/check'),
+  applyUpdate: () => alova.Post('/api/update/apply', {}),
+
   // 管理页鉴权
   adminStatus: () => alova.Get('/api/admin/status'),
   adminLogin: (payload) => alova.Post('/api/admin/login', payload),

@@ -31,7 +31,7 @@ npm start              # node server.js，默认 http://127.0.0.1:3800
 | `npm start` | 启动代理；管理页来自 `dist/` |
 | `npm run build` | 构建管理页 |
 | `npm run dev` | 只起 Vite（`:5173`），API 代理到 `:3800`，需另开终端 `npm start` |
-| `npm test` | 语法检查（`server.js` + `core/**` 自动遍历）+ Responses 转换层回归测试（`scripts/`） |
+| `npm test` | 语法检查（`server.js` + `core/**` 自动遍历）+ Responses 转换层 / 版本更新回归测试（`scripts/`） |
 
 启动后会自动打开管理页。关掉自动打开：
 
@@ -226,6 +226,7 @@ ERROR codex_core::tools::router: error=unsupported call: mcp__cua_repl__js
 | `CODEBUDDY_ADMIN_PASSWORD` | 空 | 管理页鉴权初始密码。首次启动时写入并强制首次登录改密；为空则自动生成一次性随机密码并打印到启动日志 |
 | `CODEBUDDY_TRUST_PROXY` | 空（关闭） | 设为 `true` / `1` 才信任反向代理（Cloudflare / nginx）注入的 `X-Forwarded-For`。**未设置时不信任**，限流按直连 IP 计算，防止伪造 XFF 绕过限流 |
 | `CODEBUDDY_DEBUG` | 空 | 把最近一次 Responses 请求 dump 到 `/tmp/codebuddy-debug-last.json` |
+| `CODEBUDDY_UPDATE_BRANCH` | `main` | 版本检查读取的 GitHub 分支（自更新也按该分支 `git pull`） |
 
 国际版可设 `CODEBUDDY_ENDPOINT=https://www.codebuddy.ai`。
 
@@ -366,6 +367,27 @@ sqlite3 ~/.codebuddy-proxy/proxy.db "DELETE FROM admin_users; DELETE FROM admin_
 | DELETE | `/api/keys/:id` | 删除 API 密钥 |
 | GET | `/api/usage` | 用量记录：按时间 / 账号 / 密钥 / 模型筛选、分页，含 token 汇总 |
 | GET | `/api/usage/stats?dimension=account|apiKey` | 按天聚合的 token 用量，供首页图表 |
+| GET | `/api/update/check` | 检查 GitHub 上的最新版本（只读，不修改任何文件） |
+| POST | `/api/update/apply` | 执行自更新：`git pull` → 按需 `npm install` → `npm run build` |
+
+## 版本更新提示
+
+管理页右上角的版本徽标会自动检查 GitHub 上的最新版本：
+
+- 有新版时徽标变绿并显示 `v1.1.1 → v1.2.0`，点击打开更新面板。
+- 点「立即更新」会依次执行 **`git pull` →（`package.json` 变化时）`npm install` → `npm run build`**，每步结果都显示在面板里。
+- 版本来源是 `raw.githubusercontent.com` 上 `main` 分支的 `package.json`（无需 token，也不受 GitHub API 限流影响）。可用 `CODEBUDDY_UPDATE_BRANCH` 换分支。
+
+**安全约束**（`core/update.js`）：
+
+- **工作区有未提交改动时拒绝更新**，避免 `git pull` 覆盖你的本地修改；面板会提示先 `git stash` 或提交。
+- 非 git 仓库、未配置 `origin` 远端时同样拒绝，并给出手动更新命令。
+- 外部命令一律用 `execFile` + 参数数组（不拼 shell 字符串），避免命令注入。
+- 同一时刻只允许一个更新任务，并发请求返回 `409`。
+
+**更新后必须重启服务**：`git pull` 改的是磁盘上的 `core/*.js`，而进程里已加载的是旧代码，所以服务端改动要**重启**才生效（前端刷新页面即可）。面板在更新完成后会提示这一点。
+
+> ⚠️ 该功能要求部署目录是一个**干净的 git 工作区**。若你是下载 zip 解压部署的（没有 `.git`），徽标仍会提示有新版本，但「立即更新」会禁用并给出手动命令。
 
 ## 用量统计
 
@@ -430,11 +452,13 @@ core/              服务端
   models.js        模型目录
   routes.js        路由与 dist 静态资源
   util.js          请求 / 响应工具
+  update.js        版本检查与自更新（git pull + 构建）
 web/               管理页源码（Vite + Vue）
 dist/              管理页构建产物
 scripts/           校验脚本
   check-all.js     语法检查（server.js + core/ 遍历）
   test-responses.js  Responses 转换层回归测试
+  test-update.js   版本比较与自更新护栏测试
 ```
 
 ## 安全提示

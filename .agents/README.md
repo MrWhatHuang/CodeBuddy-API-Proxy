@@ -133,6 +133,10 @@ GET  /api/status|/health|/session|/login*|/logout  → 各自处理
 - **流式分支必须 `res.end()`**：`streamChatToResponses` 曾漏写 `clientRes.end()`，导致连接挂起、curl 超时。改流式代码务必确认所有分支都 end。
 - **写 SSE 前先 writeHead**：`handleResponses` 先 `writeHead(200, text/event-stream)`，若上游返回非 SSE（错误），不能再 `writeHead`（`ERR_HTTP_HEADERS_SENT`）；要改成读 body 后走 `response.failed` 事件（已处理）。
 - **`shell` 单引号冲突**：调试时别写 `node -e '...包含单引号...'`，写到临时 `.js` 文件再 `node`。
+- **Windows 上 `execFile('npm.cmd')` 会抛 `spawn EINVAL`**：Node 18+ 对 `.cmd/.bat` 要求 `shell: true`（CVE-2024-27980 的缓解）。`core/update.js` 的 `run()` 已按 `\.(cmd|bat)$/` 自动加 `shell`，**改动那里时别把它删掉**，否则更新到 `npm install`/`npm run build` 这一步必失败。
+- **自更新不能在有本地改动时 pull**：`applyUpdate()` 先用 `git status --porcelain` 判定，脏工作区直接拒绝。这是有意为之——`git pull` 会覆盖未提交修改。别为了「让更新更顺」去掉这个判断。
+- **自更新不自动重启**：`git pull` 只改磁盘文件，进程内已是旧代码。刻意不做自动重启（Windows 上易产生孤儿进程 / 端口占用），由面板提示用户手动重启。
+- **测试自更新别在真实仓库上跑**：`git pull`/`npm install` 有副作用。用 `git clone` 到临时目录再测（`scripts/test-update.js` 只测护栏与纯逻辑，不真的 pull）。
 - **token 别泄露**：任何输出/日志里 token 都要打码（用 `maskedToken` 或手动截断）；`/session` 返回明文，生产要删或加鉴权。
 - **`CODEBUDDY_DEBUG=1`** 会把最近一次 `/v1/responses` 的原始请求+转换结果 dump 到 `/tmp/codebuddy-debug-last.json`（含用户 prompt），仅调试用。
 
@@ -179,6 +183,7 @@ cd /tmp && OPENAI_API_KEY=dummy codex exec --skip-git-repo-check --ephemeral -s 
 | 改 Responses 转换 | `responsesToChatInput`（请求）、`streamChatToResponses`（流式响应）、`chatCompletionToResponse`（非流式响应） |
 | 改解密策略        | `decryptSafeStorage`（第 349 行），用 `JSON.parse` 判定策略对错                                               |
 | 调试 Codex 请求   | 设 `CODEBUDDY_DEBUG=1`，读 `/tmp/codebuddy-debug-last.json`                                                   |
+| 改版本检查 / 自更新 | `core/update.js`（`checkRemoteVersion` / `applyUpdate`）+ `core/routes.js` 的 `/api/update/*`；前端在 `web/src/components/TopBar.vue` |
 | 发版 / 改版本号   | `package.json` 的 `version`（唯一来源，见第 10.1 节）；改完必须重新 `npm run build`                            |
 
 ## 10. 约定与规范
