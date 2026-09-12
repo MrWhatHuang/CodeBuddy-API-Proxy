@@ -31,7 +31,7 @@ npm start              # node server.js，默认 http://127.0.0.1:3800
 | `npm start` | 启动代理；管理页来自 `dist/` |
 | `npm run build` | 构建管理页 |
 | `npm run dev` | 只起 Vite（`:5173`），API 代理到 `:3800`，需另开终端 `npm start` |
-| `npm test` | 语法检查 |
+| `npm test` | 语法检查（`server.js` + `core/**` 自动遍历）+ Responses 转换层回归测试（`scripts/`） |
 
 启动后会自动打开管理页。关掉自动打开：
 
@@ -161,10 +161,47 @@ codex exec "你的任务"
 
 未设置密钥时，`OPENAI_API_KEY` 可填任意占位值（如 `dummy`）。
 
-实测（Codex CLI 0.148）：文本回复、shell 工具调用、多轮 tool loop 均正常。
+实测（Codex CLI 0.153）：文本回复、shell 工具调用、多轮 tool loop 均正常。
 
 > 1. Codex 可能提示 `Model metadata for '...' not found`（自定义模型不在 Codex 内置目录），不影响使用。
 > 2. CodeBuddy 会拦截含 `Codex` / `OpenAI` 的系统提示词（`11128 Illegal API invocation from an unapproved channel`）。代理会净化 `instructions` / `developer` 系统消息（`Codex`→`CodeBuddy`、`OpenAI`→`Tencent`），用户消息和工具参数不动。
+
+### Responses → chat/completions 转换说明
+
+上游 `copilot.tencent.com` **只有 `chat/completions`，没有 `Responses` 路由**（`POST /v1/responses`、`/v2/responses` 均返回 `404 Route Not Found`），所以本代理必须做协议转换。转换中需要特别注意的几点：
+
+- **工具展平**：Codex 会下发多种工具类型，其中 `namespace`（内置工具组，如 `multi_agent_v1`、`mcp__cua_repl`、`mcp__node_repl`）与 `web_search` 不是 `chat/completions` 认识的 `type: 'function'`。代理会把它们**展平成 function 工具**（子工具命名为 `命名空间__子工具`，如 `multi_agent_v1__spawn_agent`），而不是丢弃——早期版本会静默丢掉这些工具，导致 Codex 的子代理 / 浏览器 / node_repl 等内置工具全部不可用。上游回传工具调用时再还原成 Codex 认得的原始子工具名；历史里的 `function_call` 也会重新映射回扁平名，保证多轮 tool loop 不断链。
+- **思维链（reasoning）**：上游用 `delta.reasoning_content` 回传思维链，代理会转成 `response.reasoning_summary_text.delta` 等 Responses 事件（`reasoning` 输出项固定排在 `output_index: 0`，正文与工具调用依次后移）。早期版本只累加不发送，流式下思维链完全丢失。同时兼容 `delta.reasoning` 为字符串或对象（`{content}`）的写法；若 reasoning 在正文/工具调用**之后**才到达，则只并入最终 `response.completed`，不再补发流式事件（补发会破坏已发出的 `output_index`）。
+- **`output_index` 分配**：`output_index` 按「基址 + 固定位置」统一计算（`reasoning` 占 0，其后依次是各 `function_call`，`message` 排最后），`output_item.added` 与 `output_item.done` 必须用同一公式，且 index 连续无空洞、item 按 index 升序完结。早期版本在 `added` 时重复计入了一次工具数量，导致**多个工具调用时**同一 item 的 `added`/`done` 拿到不同 index（单工具时碰巧正确，不易发现）。
+- **`max_output_tokens`**：上游只认 `max_tokens`，代理会做字段改名（`max_output_tokens` / `max_completion_tokens` 在上游是**静默忽略**的）。
+- **usage**：主动带 `stream_options: { include_usage: true }`，确保流式末块带上 token 用量。
+- 上游对 `temperature` / `top_p` / `stop` / `presence_penalty` / `response_format` 等参数**静默忽略**（不报错也不生效），`tools` / `messages` / 数组形式的 `content` 则正常支持。
+
+#### 已知限制：Codex 的 namespace 子工具（浏览器 / 子代理）无法调用
+
+用非 OpenAI 官方 provider（即 `wire_api = "responses"` 的自定义 base_url，也就是本代理这种用法）时，**Codex 自己不会把 `namespace` 里的子工具注册成可调用项**。表现是模型发起调用后 Codex 打印：
+
+```
+ERROR codex_core::tools::router: error=unsupported call: mcp__cua_repl__js
+```
+
+这**不是代理丢工具**——代理已把 `mcp__cua_repl/js` 正确展平成 `mcp__cua_repl__js` 发给上游（可在「记录完整请求体」日志的 `convertedTools` 里看到），上游也正常返回了调用。断点在 Codex 侧的路由器。实测对照（Codex CLI 0.153）：
+
+| 回传的工具名 | 结果 |
+|---|---|
+| `exec_command`（普通 function 工具） | ✅ 正常执行 |
+| `write_stdin` / `view_image` / `create_goal` | ✅ 正常执行 |
+| `js`（子工具裸名） | ❌ `unsupported call: js` |
+| `mcp__cua_repl__js`（扁平名） | ❌ `unsupported call: mcp__cua_repl__js` |
+| `mcp__cua_repl.js` / `mcp__cua_repl:js` | ❌ 同样失败 |
+
+也就是说，**普通 function 工具（`exec_command` / shell / apply_patch 等）完全可用，namespace 子工具在当前 Codex 版本下怎么命名都调不通**，属于 Codex 上游问题，代理侧无法绕过。相关 issue：[openai/codex#23186](https://github.com/openai/codex/issues/23186)、[#26234](https://github.com/openai/codex/issues/26234)、[#26977](https://github.com/openai/codex/issues/26977)、[#42488](https://github.com/openai/codex/issues/42488)。
+
+> 之所以仍然把 namespace/web_search 展平转发而不是丢弃：一是让**模型**能看到这些工具的存在并正确理解自身能力边界，二是等 Codex 修好后无需再改代理；三是部分客户端（非 Codex）能正常路由这些名字。
+
+### 排查 agent 客户端请求
+
+想看 Codex / Cursor 等客户端到底发了什么，可在「系统配置 → 记录完整请求体」打开 `logging.requestBody`（或用 API 设置）。开启后每次请求会把**原始请求体全文**写入日志（分类 `responses` / `proxy`，条目形如 `[request body] /v1/responses 34325 bytes`），meta 里附带 `toolTypes`（各类型工具计数）与 `convertedTools`（转换后发给上游的工具名列表）。请求体可能较大且包含对话内容，默认关闭，排查完建议关掉；`logging.requestBodyMaxKb` 控制截断上限。
 
 ## 环境变量
 
@@ -200,7 +237,7 @@ codex exec "你的任务"
 curl -X PUT http://127.0.0.1:3800/api/config \
   -H "Content-Type: application/json" \
   -d '{
-    "logging": { "enabled": true, "details": true, "level": "info", "retentionDays": 7, "maxRows": 10000 },
+    "logging": { "enabled": true, "details": true, "requestBody": false, "requestBodyMaxKb": 256, "level": "info", "retentionDays": 7, "maxRows": 10000 },
     "autoOpen": true,
     "defaultModel": "default",
     "forceModel": "",
@@ -223,6 +260,8 @@ curl -X PUT http://127.0.0.1:3800/api/config -H "Content-Type: application/json"
 | `logging.level` | `info` | `debug` / `info` / `warn` / `error`，只记该级别及以上 |
 | `logging.retentionDays` | `7` | 超过天数删除；`0` = 永久 |
 | `logging.maxRows` | `10000` | 超过条数删最旧；`0` = 不限制 |
+| `logging.requestBody` | `false` | 把客户端发来的**完整请求体**写入日志（含 `messages` / `tools` / `input`），用于排查 Codex 等 agent 客户端的调用问题 |
+| `logging.requestBodyMaxKb` | `256` | 请求体日志截断上限（KB），**按 UTF-8 字节**截断（不会切碎中文，结果不会超出上限） |
 | `autoOpen` | `true` | 启动后自动打开管理页 |
 | `defaultModel` | `default` | 请求未带 `model` 时使用 |
 | `forceModel` | 空 | 非空则覆盖所有请求的 `model` |
@@ -393,6 +432,9 @@ core/              服务端
   util.js          请求 / 响应工具
 web/               管理页源码（Vite + Vue）
 dist/              管理页构建产物
+scripts/           校验脚本
+  check-all.js     语法检查（server.js + core/ 遍历）
+  test-responses.js  Responses 转换层回归测试
 ```
 
 ## 安全提示

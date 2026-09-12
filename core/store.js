@@ -243,6 +243,9 @@ function publicValues(cfg) {
       level: config.LOG_LEVELS.includes(c['logging.level']) ? c['logging.level'] : 'info',
       retentionDays: asInt(c['logging.retentionDays'], 7),
       maxRows: asInt(c['logging.maxRows'], 10000),
+      // 记录完整请求体（含 messages / tools），用于排查 agent 客户端发来的原始请求
+      requestBody: asBool(c['logging.requestBody'], false),
+      requestBodyMaxKb: asInt(c['logging.requestBodyMaxKb'], 256),
     },
     autoOpen: asBool(c.autoOpen, true),
     defaultModel: c.defaultModel || 'default',
@@ -268,6 +271,8 @@ function applyPublicPatch(body) {
     if (config.LOG_LEVELS.includes(lg.level)) patch['logging.level'] = lg.level;
     if (typeof lg.retentionDays === 'number') patch['logging.retentionDays'] = String(clampInt(lg.retentionDays, 0, 3650));
     if (typeof lg.maxRows === 'number') patch['logging.maxRows'] = String(clampInt(lg.maxRows, 0, 1000000));
+    if (typeof lg.requestBody === 'boolean') patch['logging.requestBody'] = String(lg.requestBody);
+    if (typeof lg.requestBodyMaxKb === 'number') patch['logging.requestBodyMaxKb'] = String(clampInt(lg.requestBodyMaxKb, 1, 4096));
   }
   if (typeof body.autoOpen === 'boolean') patch.autoOpen = String(body.autoOpen);
   if (typeof body.defaultModel === 'string' && body.defaultModel.trim()) patch.defaultModel = body.defaultModel.trim();
@@ -303,6 +308,20 @@ function getCorsOrigin() {
 
 function loggingDetailsEnabled() {
   return asBool(getConfig()['logging.details'], true);
+}
+
+/**
+ * 请求体日志配置。
+ * 默认关闭：请求体可能很大（Codex 一次能发几十 KB 的 tools + 历史），
+ * 且含用户代码/对话内容，只在排查时开启。
+ * 返回 { enabled, maxBytes }；maxBytes 用于截断，避免超大 body 撑爆日志表。
+ */
+function getRequestBodyLogConfig() {
+  const cfg = getConfig();
+  return {
+    enabled: asBool(cfg['logging.requestBody'], false),
+    maxBytes: Math.max(1, asInt(cfg['logging.requestBodyMaxKb'], 256)) * 1024,
+  };
 }
 
 function addLog(level, category, message, meta) {
@@ -1197,7 +1216,7 @@ module.exports = {
   getHiddenModels, setModelHidden,
 
   getConfig, setConfig, publicValues, applyPublicPatch,
-  getRequestTimeoutMs, getCorsOrigin, loggingDetailsEnabled,
+  getRequestTimeoutMs, getCorsOrigin, loggingDetailsEnabled, getRequestBodyLogConfig,
   addLog, queryLogs, clearLogs, stats,
 
   // API 密钥

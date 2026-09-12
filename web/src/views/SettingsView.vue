@@ -13,6 +13,8 @@ const { data: cfg, loading, send: reload } = useRequest(() => api.config());
 const form = reactive({
   loggingEnabled: true,
   loggingDetails: true,
+  loggingRequestBody: false,
+  loggingRequestBodyMaxKb: 256,
   logLevel: 'info',
   retentionDays: 7,
   maxRows: 10000,
@@ -29,6 +31,8 @@ watch(cfg, (c) => {
   if (!c) return;
   form.loggingEnabled = c.values.logging.enabled;
   form.loggingDetails = c.values.logging.details;
+  form.loggingRequestBody = c.values.logging.requestBody === true;
+  form.loggingRequestBodyMaxKb = c.values.logging.requestBodyMaxKb || 256;
   form.logLevel = c.values.logging.level;
   form.retentionDays = c.values.logging.retentionDays;
   form.maxRows = c.values.logging.maxRows;
@@ -52,6 +56,8 @@ async function save() {
       logging: {
         enabled: form.loggingEnabled,
         details: form.loggingDetails,
+        requestBody: form.loggingRequestBody,
+        requestBodyMaxKb: Number(form.loggingRequestBodyMaxKb),
         level: form.logLevel,
         retentionDays: Number(form.retentionDays),
         maxRows: Number(form.maxRows),
@@ -82,6 +88,8 @@ async function save() {
 function resetForm() {
   form.loggingEnabled = true;
   form.loggingDetails = true;
+  form.loggingRequestBody = false;
+  form.loggingRequestBodyMaxKb = 256;
   form.logLevel = 'info';
   form.retentionDays = 7;
   form.maxRows = 10000;
@@ -191,6 +199,25 @@ const levels = ['debug', 'info', 'warn', 'error'];
             <input type="checkbox" v-model="form.loggingDetails" />
             <span class="slider"></span>
           </label>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">{{ t('settings.loggingRequestBody') }}</div>
+            <div class="hint">{{ t('settings.loggingRequestBodyDesc') }}</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" v-model="form.loggingRequestBody" />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div v-if="form.loggingRequestBody" class="field" style="margin-top: 12px">
+          <label>{{ t('settings.loggingRequestBodyMaxKb') }}</label>
+          <input v-model.number="form.loggingRequestBodyMaxKb" type="number" min="1" max="4096" class="input" />
+          <p class="hint">{{ t('settings.loggingRequestBodyMaxKbDesc') }}</p>
         </div>
 
         <div class="divider"></div>

@@ -7,6 +7,9 @@ const store = require('./store');
 const logger = require('./logger');
 const util = require('./util');
 const auth = require('./auth');
+// 仅用于复用请求体日志（logRequestBody 内部按配置判断是否写入，无循环依赖：
+// responses.js 引用 openai.js 的 aggregateSseToCompletion 是运行时延迟引用）
+const responses = require('./responses');
 
 const UPSTREAM_MAP = {
   '/v1/chat/completions': '/v2/chat/completions',
@@ -102,6 +105,8 @@ async function handleProxy(req, res, pathname) {
   const needAggregate = isChat && !isStream;
 
   if (needAggregate) payload.stream = true;
+  // 完整请求体日志（默认关闭，见「系统配置 → 记录完整请求体」）
+  responses.logRequestBody('proxy', pathname, payload, null);
   const jsonBody = JSON.stringify(payload);
 
   const accountKey = auth.extractAccountKey(req, payload);

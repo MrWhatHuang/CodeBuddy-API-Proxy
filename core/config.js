@@ -61,6 +61,8 @@ const DEFAULT_CONFIG = {
   'logging.level': 'info',            // debug | info | warn | error
   'logging.retentionDays': '7',       // 日志保留天数，0 = 永久
   'logging.maxRows': '10000',         // 日志条数上限，超出后删除最旧，0 = 不限制
+  'logging.requestBody': 'false',     // 是否记录完整请求体（排查 agent 客户端发来的原始请求）
+  'logging.requestBodyMaxKb': '256',  // 请求体日志截断上限（KB）
   'autoOpen': process.env.CODEBUDDY_NO_OPEN ? 'false' : 'true',
   'defaultModel': process.env.CODEBUDDY_DEFAULT_MODEL || 'default',
   'forceModel': process.env.CODEBUDDY_FORCE_MODEL || '',
