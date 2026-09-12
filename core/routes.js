@@ -320,13 +320,16 @@ async function route(req, res) {
         return;
       }
 
-      // 更新成功后按平台决定是否自动重启：
-      //   Linux/macOS —— 先把响应写回，再原地重启进程（用户无需操作）
-      //   Windows     —— 不自动重启（易产生孤儿进程 / 端口占用），由前端提示手动重启
+      // 更新成功后按运行环境决定如何重启：
+      //   Linux/macOS（裸进程）—— 先写回响应，再原地重启进程，用户无需操作
+      //   systemd 托管        —— 不能自己 spawn（会与 Restart=always 抢端口），
+      //                          提示用户执行 systemctl restart
+      //   Windows             —— 同理不自动重启，提示手动 npm start
       const canRestart = updater.supportsAutoRestart();
       result.canAutoRestart = canRestart;
       result.restartRequired = true;
       result.processPlatform = process.platform;
+      result.restartHint = updater.restartHint();
 
       // 先结束响应，确保前端能收到 ok 与步骤信息，再重启（否则连接会被中断）
       util.sendJson(res, 200, result);
@@ -339,6 +342,8 @@ async function route(req, res) {
             logger.log('error', 'system', `自动重启失败: ${e.message}`);
           });
         }, 600);
+      } else if (updater.isUnderSystemd()) {
+        logger.log('info', 'system', '更新完成，服务由 systemd 托管，请执行: sudo systemctl restart codebuddy-proxy');
       } else {
         logger.log('info', 'system', '更新完成，当前系统需手动重启服务才生效');
       }

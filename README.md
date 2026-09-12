@@ -382,8 +382,11 @@ sqlite3 ~/.codebuddy-proxy/proxy.db "DELETE FROM admin_users; DELETE FROM admin_
 
 | 系统 | 行为 |
 |---|---|
-| **Linux / macOS** | **自动重启**：服务端先 `close()` 释放端口，再以原 `argv`/`cwd` 拉起新进程（`detached` + `stdio: inherit`），随后旧进程退出。前端会轮询 `/health`，服务起来后**自动刷新页面**，全程无需操作。 |
-| **Windows** | **提示手动重启**：不自动重启（子进程易产生孤儿进程与端口占用 `EADDRINUSE`），面板会提示关闭进程后重新 `npm start`，并给出「刷新页面」按钮。 |
+| **Linux / macOS（裸进程）** | **自动重启**：服务端先 `close()` 释放端口，再以原 `argv`/`cwd` 拉起新进程（`detached` + `stdio: inherit`），随后旧进程退出。前端会轮询 `/health`，服务起来后**自动刷新页面**，全程无需操作。 |
+| **Linux + systemd** | **提示手动重启**：面板给出 `sudo systemctl restart codebuddy-proxy`。代理*不会*自行重启——它是 `spawn` 新进程再让主进程退出，而 systemd 见主进程退出会按 `Restart=always` 再拉一个，两个进程抢同一端口；且新进程会脱离 unit 的 cgroup，日志不再进 journald。 |
+| **Windows** | **提示手动重启**：子进程易产生孤儿进程与端口占用（`EADDRINUSE`），面板提示关闭进程后重新 `npm start`，并提供「刷新页面」按钮。 |
+
+启动时会自动识别是否由 systemd 托管（检测 `INVOCATION_ID` / `JOURNAL_STREAM`），无需手工配置。
 
 自动重启最多等待 60 秒；超时会在面板里提示（服务可能启动失败），此时需手动检查。
 
@@ -398,7 +401,7 @@ sqlite3 ~/.codebuddy-proxy/proxy.db "DELETE FROM admin_users; DELETE FROM admin_
 
 > ⚠️ 该功能要求部署目录是一个**干净的 git 工作区**。若你是下载 zip 解压部署的（没有 `.git`），徽标仍会提示有新版本，但「立即更新」会禁用并给出手动命令。
 
-> ⚠️ 若用 `pm2` / `systemd` 等进程管理器托管，请确认其重启策略：自动重启出来的新进程可能与管理器失联，建议改用管理器自身的重启命令（如 `pm2 restart`），或在面板里关掉自动重启（Windows 行为即手动模式）。
+> ⚠️ 若用 `pm2` / `systemd` 等进程管理器托管，代理不会自行重启（原因见上表），请在管理器侧重启。systemd 会自动识别并给出命令；pm2 请手工执行 `pm2 restart <name>`。
 
 ## 用量统计
 

@@ -135,12 +135,13 @@ GET  /api/status|/health|/session|/login*|/logout  → 各自处理
 - **`shell` 单引号冲突**：调试时别写 `node -e '...包含单引号...'`，写到临时 `.js` 文件再 `node`。
 - **Windows 上 `execFile('npm.cmd')` 会抛 `spawn EINVAL`**：Node 18+ 对 `.cmd/.bat` 要求 `shell: true`（CVE-2024-27980 的缓解）。`core/update.js` 的 `run()` 已按 `\.(cmd|bat)$/` 自动加 `shell`，**改动那里时别把它删掉**，否则更新到 `npm install`/`npm run build` 这一步必失败。
 - **自更新不能在有本地改动时 pull**：`applyUpdate()` 先用 `git status --porcelain` 判定，脏工作区直接拒绝。这是有意为之——`git pull` 会覆盖未提交修改。别为了「让更新更顺」去掉这个判断。
-- **自更新重启分平台**（`core/update.js` 的 `restartService`）：Linux/macOS 自动重启，Windows 不重启、只提示用户手动重启。Windows 上子进程与父进程的端口/句柄继承容易产生孤儿进程与 `EADDRINUSE`，所以 `supportsAutoRestart()` 在 win32 返回 false。**别图省事把 Windows 也打开。**
+- **自更新重启分环境**（`core/update.js` 的 `restartService` / `supportsAutoRestart` / `isUnderSystemd`）：只有「Linux/macOS **且非 systemd**」才自动重启。systemd 与 Windows 都只提示用户手动重启。
+  - **systemd 托管时绝不能自动重启**：本方案是 `spawn` 新进程再让主进程退出，而 systemd 见主进程退出会按 `Restart=always` 再拉一个 → 两个进程抢同一端口（EADDRINUSE）；且 spawn 出来的进程脱离 unit 的 cgroup，`systemctl status` 与 journald 日志都会失真。判据用 systemd 注入的 `INVOCATION_ID` / `JOURNAL_STREAM`（比解析 cgroup 或看父进程 pid 稳）。服务器部署见 /opt/codebuddy-proxy（unit `codebuddy-proxy.service`，端口 8318）。
   - 自动重启必须先 `server.close()` 再退出，否则新进程抢不到端口；`routes.setActiveServer()` 就是为此把 server 句柄注入路由层（`core/index.js` 在 listen 前调用），改动 `start()` 时别漏掉这行。
   - 重启用 `spawn(process.execPath, process.argv.slice(1), { detached: true, stdio: 'inherit' })` + `unref()`，保证新进程脱离本进程组、不被一起带走，并沿用原 `argv`/`cwd`/`env`。
   - **必须先把 HTTP 响应写回再重启**（`routes.js` 里先 `sendJson` 再 `setTimeout` 重启），否则前端拿不到结果、只会看到连接中断。
   - 前端靠轮询 `/health` 判断服务是否回来，然后自动 `location.reload()`；60s 超时会提示用户（见 `TopBar.vue` 的 `waitForRestart`）。
-- **自更新不自动重启**：`git pull` 只改磁盘文件，进程内已是旧代码。Windows 上刻意不做自动重启，由面板提示用户手动重启。
+- **为什么必须重启**：`git pull` 只改磁盘文件，进程内已是旧代码。所以任何更新后都要重启，区别只在「谁来重启」（见上一条）。
 - **测试自更新别在真实仓库上跑**：`git pull`/`npm install` 有副作用。用 `git clone` 到临时目录再测（`scripts/test-update.js` 只测护栏与纯逻辑，不真的 pull）。
 - **token 别泄露**：任何输出/日志里 token 都要打码（用 `maskedToken` 或手动截断）；`/session` 返回明文，生产要删或加鉴权。
 - **`CODEBUDDY_DEBUG=1`** 会把最近一次 `/v1/responses` 的原始请求+转换结果 dump 到 `/tmp/codebuddy-debug-last.json`（含用户 prompt），仅调试用。

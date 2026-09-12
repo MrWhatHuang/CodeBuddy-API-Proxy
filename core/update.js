@@ -243,9 +243,36 @@ async function applyUpdate() {
   };
 }
 
-/** 是否支持自动重启：仅 Linux / macOS */
+/**
+ * 是否被 systemd 托管。
+ *
+ * systemd 会为每个 unit 注入 INVOCATION_ID / JOURNAL_STREAM，这两个变量在普通
+ * shell 里不存在，是最可靠的判据（比检查父进程 pid 更稳，也不依赖 cgroup 解析）。
+ */
+function isUnderSystemd() {
+  return !!(process.env.INVOCATION_ID || process.env.JOURNAL_STREAM);
+}
+
+/**
+ * 是否支持自动重启。
+ *
+ * 仅 Linux / macOS，且**不能**在 systemd 之类的进程管理器下自动重启：
+ * 我们的做法是 spawn 新进程再让主进程退出，而 systemd 看到主进程退出会按
+ * Restart=always 再拉起一个，于是两个进程抢同一端口（EADDRINUSE）；
+ * 且 spawn 出来的新进程脱离了 unit 的 cgroup，日志也不再进 journald。
+ * 这种情况必须交给管理器自己重启（systemctl restart）。
+ */
 function supportsAutoRestart() {
-  return process.platform === 'linux' || process.platform === 'darwin';
+  if (process.platform !== 'linux' && process.platform !== 'darwin') return false;
+  if (isUnderSystemd()) return false;
+  return true;
+}
+
+/** 提供给前端展示的「该如何重启」提示 */
+function restartHint() {
+  if (isUnderSystemd()) return { mode: 'systemd', command: 'sudo systemctl restart codebuddy-proxy' };
+  if (process.platform === 'win32') return { mode: 'manual', command: 'npm start' };
+  return { mode: 'auto', command: '' };
 }
 
 /**
@@ -263,6 +290,13 @@ function supportsAutoRestart() {
  * @returns {Promise<{ok:boolean, supported:boolean, reason?:string}>}
  */
 async function restartService({ server, exitDelayMs = 800 } = {}) {
+  if (isUnderSystemd()) {
+    return {
+      ok: false,
+      supported: false,
+      reason: '服务由 systemd 托管，请执行 sudo systemctl restart codebuddy-proxy 重启',
+    };
+  }
   if (!supportsAutoRestart()) {
     return { ok: false, supported: false, reason: '当前系统不支持自动重启，请手动重启服务' };
   }
@@ -309,6 +343,8 @@ module.exports = {
   applyUpdate,
   restartService,
   supportsAutoRestart,
+  isUnderSystemd,
+  restartHint,
   compareVersion,
   parseVersion,
   readGitState,

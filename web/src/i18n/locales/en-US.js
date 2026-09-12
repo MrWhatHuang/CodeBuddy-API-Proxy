@@ -37,6 +37,7 @@ export default {
     restarting: 'Restarting…',
     restartTimeout: 'Timed out waiting for the service to restart. Check that the process started, then reload this page.',
     manualRestart: 'Code pulled and rebuilt. On Windows you need to restart the service manually: stop the running process and run npm start again. The page itself can be reloaded now.',
+    systemdRestart: 'Code pulled and rebuilt. This service is managed by systemd — run the command below to restart (the proxy will not restart itself, to avoid conflicting with systemd):',
     reloadPage: 'Reload page',
   },
   common: {

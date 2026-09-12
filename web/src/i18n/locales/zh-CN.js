@@ -37,6 +37,7 @@ export default {
     restarting: '服务重启中…',
     restartTimeout: '等待服务重启超时。请确认进程是否正常启动，然后手动刷新本页面。',
     manualRestart: '代码已拉取并构建完成。当前系统（Windows）需要你手动重启服务：关闭正在运行的进程后重新执行 npm start。前端页面刷新即可。',
+    systemdRestart: '代码已拉取并构建完成。服务由 systemd 托管，请执行以下命令重启（本代理不会自行重启，以免与 systemd 冲突）：',
     reloadPage: '刷新页面',
   },
   common: {

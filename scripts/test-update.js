@@ -100,10 +100,66 @@ async function check(name, fn) {
 
   /* ---------------- 平台重启门控 ---------------- */
 
-  await check('supportsAutoRestart：仅 Linux/macOS 为 true', () => {
-    const expected = process.platform === 'linux' || process.platform === 'darwin';
-    assert.strictEqual(updater.supportsAutoRestart(), expected,
-      `platform=${process.platform} 时 supportsAutoRestart 应为 ${expected}`);
+  await check('isUnderSystemd：识别 systemd 注入的 INVOCATION_ID / JOURNAL_STREAM', () => {
+    const a = process.env.INVOCATION_ID;
+    const b = process.env.JOURNAL_STREAM;
+    try {
+      delete process.env.INVOCATION_ID;
+      delete process.env.JOURNAL_STREAM;
+      assert.strictEqual(updater.isUnderSystemd(), false, '普通 shell 下不应判定为 systemd');
+
+      process.env.INVOCATION_ID = 'test-invocation';
+      assert.strictEqual(updater.isUnderSystemd(), true, 'INVOCATION_ID 存在时应判定为 systemd');
+
+      delete process.env.INVOCATION_ID;
+      process.env.JOURNAL_STREAM = '8:12345';
+      assert.strictEqual(updater.isUnderSystemd(), true, 'JOURNAL_STREAM 存在时应判定为 systemd');
+    } finally {
+      if (a === undefined) delete process.env.INVOCATION_ID; else process.env.INVOCATION_ID = a;
+      if (b === undefined) delete process.env.JOURNAL_STREAM; else process.env.JOURNAL_STREAM = b;
+    }
+  });
+
+  await check('supportsAutoRestart：systemd 托管下必须为 false（避免与 Restart=always 抢端口）', () => {
+    const a = process.env.INVOCATION_ID;
+    try {
+      process.env.INVOCATION_ID = 'test-invocation';
+      assert.strictEqual(updater.supportsAutoRestart(), false,
+        'systemd 下不得自动重启：新进程会脱离 unit，且与 Restart=always 抢同一端口');
+      const hint = updater.restartHint();
+      assert.strictEqual(hint.mode, 'systemd');
+      assert.ok(/systemctl restart/.test(hint.command), `提示应给出 systemctl 命令，实际: ${hint.command}`);
+    } finally {
+      if (a === undefined) delete process.env.INVOCATION_ID; else process.env.INVOCATION_ID = a;
+    }
+  });
+
+  await check('restartService：systemd 下拒绝并给出 systemctl 提示', async () => {
+    const a = process.env.INVOCATION_ID;
+    try {
+      process.env.INVOCATION_ID = 'test-invocation';
+      const r = await updater.restartService({ server: null, exitDelayMs: 10 });
+      assert.strictEqual(r.ok, false, 'systemd 下不得自行重启');
+      assert.strictEqual(r.supported, false);
+      assert.ok(/systemctl/.test(r.reason), `原因应包含 systemctl，实际: ${r.reason}`);
+    } finally {
+      if (a === undefined) delete process.env.INVOCATION_ID; else process.env.INVOCATION_ID = a;
+    }
+  });
+
+  await check('supportsAutoRestart：仅 Linux/macOS 裸进程为 true', () => {
+    const a = process.env.INVOCATION_ID;
+    const b = process.env.JOURNAL_STREAM;
+    try {
+      delete process.env.INVOCATION_ID;
+      delete process.env.JOURNAL_STREAM;
+      const expected = process.platform === 'linux' || process.platform === 'darwin';
+      assert.strictEqual(updater.supportsAutoRestart(), expected,
+        `platform=${process.platform} 且非 systemd 时 supportsAutoRestart 应为 ${expected}`);
+    } finally {
+      if (a !== undefined) process.env.INVOCATION_ID = a;
+      if (b !== undefined) process.env.JOURNAL_STREAM = b;
+    }
   });
 
   await check('restartService：Windows 上拒绝并给出原因（不 spawn）', async () => {

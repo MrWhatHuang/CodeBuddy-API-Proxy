@@ -42,8 +42,10 @@ const applying = ref(false);
 const applySteps = ref([]);
 const applyError = ref('');
 const applyDone = ref(false);
-// 服务端是否会自动重启（Linux/macOS），以及重启后的等待状态
+// 服务端是否会自动重启（Linux/macOS 裸进程），以及重启后的等待状态
 const canAutoRestart = ref(false);
+const restartMode = ref('');
+const restartCommand = ref('');
 const restarting = ref(false);
 const restartTimedOut = ref(false);
 
@@ -107,6 +109,9 @@ async function doUpdate() {
     applySteps.value = (r && r.steps) || [];
     applyDone.value = true;
     canAutoRestart.value = !!(r && r.canAutoRestart);
+    // 服务端告诉前端「该怎么重启」：auto / systemd / manual
+    restartMode.value = (r && r.restartHint && r.restartHint.mode) || '';
+    restartCommand.value = (r && r.restartHint && r.restartHint.command) || '';
     checkState.value = 'uptodate';
 
     // Linux/macOS：服务端会自行重启，这里轮询等待它起来后自动刷新页面
@@ -270,9 +275,14 @@ onBeforeUnmount(() => {
           <div class="update-restart-title">
             <Icon name="check" :size="14" /> {{ t('update.doneTitle') }}
           </div>
-          <!-- Linux/macOS：服务端会自动重启，页面也会自动刷新 -->
+          <!-- Linux/macOS（裸进程）：服务端会自动重启，页面也会自动刷新 -->
           <div v-if="canAutoRestart" class="update-restart-body">
             {{ restartTimedOut ? t('update.restartTimeout') : t('update.autoRestarting') }}
+          </div>
+          <!-- systemd 托管：给出 systemctl 命令 -->
+          <div v-else-if="restartMode === 'systemd'" class="update-restart-body">
+            {{ t('update.systemdRestart') }}
+            <div class="update-warn-cmd">{{ restartCommand }}</div>
           </div>
           <!-- Windows：需用户手动重启 -->
           <div v-else class="update-restart-body">{{ t('update.manualRestart') }}</div>
