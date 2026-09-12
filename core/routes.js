@@ -141,8 +141,8 @@ function distMissingHtml() {
   const b = buildState.getBuildState();
   const title = b.built ? '管理页面已过期' : '管理页面尚未构建';
   const body = b.built
-    ? '检测到前端源码更新，但尚未重新构建。<br>请先运行:  <b>npm install && npm run build</b><br>然后重启服务。'
-    : '请先运行:  <b>npm install && npm run build</b><br>然后重启服务。';
+    ? '检测到前端源码更新，但尚未重新构建。<br>请先运行:  <b>pnpm install && pnpm run build</b><br>然后重启服务。'
+    : '请先运行:  <b>pnpm install && pnpm run build</b><br>然后重启服务。';
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>CodeBuddy API Proxy</title>
 <style>body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#0f1115;color:#e6e8eb;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}pre{background:#1b1f24;padding:20px 24px;border-radius:10px;line-height:1.7;border:1px solid #2a2f36}</style>
 </head><body><pre>${title}。

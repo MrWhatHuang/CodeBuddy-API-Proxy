@@ -1,8 +1,13 @@
 # 依赖
 node_modules/
 
-# 前端构建产物（运行前需 `npm run build`）
+# 前端构建产物（运行前需 `pnpm run build`）
 dist/
+
+# 本仓库统一使用 pnpm（唯一锁文件是 pnpm-lock.yaml）。
+# 若有人在本地跑了 npm install，npm 会生成下面这个文件并与 pnpm-lock 冲突，忽略掉。
+package-lock.json
+yarn.lock
 
 # 系统
 .DS_Store

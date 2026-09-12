@@ -14,14 +14,17 @@
 
 ## 2. 环境与运行
 
-- 纯 Node 内置模块，**无 npm 依赖**。需要 **Node ≥ 22.5**（用了内置 `node:sqlite`，实测 Node 24 可用）。
+- **服务端运行时零依赖**：`core/**` 与 `server.js` 只 `require` Node 内置模块（`http`/`fs`/`crypto`/`node:sqlite`…），跑服务**不需要 `node_modules`**。`package.json` 里的依赖全部服务于前端构建（`vite`/`sass`/`vue`… 会被打包进 `dist/`）。
+  - 实际含义：**服务器部署可以完全跳过装依赖** —— 本地 `pnpm run build` 后把 `dist/` 传上去即可启动。不要在生产机上跑 `npm/pnpm install` 或 `build`（见第 7 节的磁盘事故）。
+- 包管理器统一用 **pnpm**（唯一锁文件 `pnpm-lock.yaml`）。`package-lock.json` 已从仓库移除并加入 `.gitignore` —— 若本地误跑 `npm install` 会重新生成它，**别再提交**。
+- 需要 **Node ≥ 22.5**（用了内置 `node:sqlite`，实测 Node 24 可用）。
 - 启动：
   ```bash
   cd codebuddy-proxy
   node server.js                 # 默认 127.0.0.1:3800，自动打开 /home 管理页
   CODEBUDDY_NO_OPEN=1 PORT=3800 node server.js   # 后台调试用：不弹浏览器
   ```
-- 语法检查：`node --check server.js`。
+- 语法检查：`node scripts/check-all.js`（遍历 `server.js` + `core/**`）。
 - 会话文件：`~/.codebuddy-proxy/session.json`（权限 0600，存 OAuth 后的 access/refresh token）。
 
 ## 3. 文件结构
@@ -133,7 +136,8 @@ GET  /api/status|/health|/session|/login*|/logout  → 各自处理
 - **流式分支必须 `res.end()`**：`streamChatToResponses` 曾漏写 `clientRes.end()`，导致连接挂起、curl 超时。改流式代码务必确认所有分支都 end。
 - **写 SSE 前先 writeHead**：`handleResponses` 先 `writeHead(200, text/event-stream)`，若上游返回非 SSE（错误），不能再 `writeHead`（`ERR_HTTP_HEADERS_SENT`）；要改成读 body 后走 `response.failed` 事件（已处理）。
 - **`shell` 单引号冲突**：调试时别写 `node -e '...包含单引号...'`，写到临时 `.js` 文件再 `node`。
-- **Windows 上 `execFile('npm.cmd')` 会抛 `spawn EINVAL`**：Node 18+ 对 `.cmd/.bat` 要求 `shell: true`（CVE-2024-27980 的缓解）。`core/update.js` 的 `run()` 已按 `\.(cmd|bat)$/` 自动加 `shell`，**改动那里时别把它删掉**，否则更新到 `npm install`/`npm run build` 这一步必失败。
+- **Windows 上 `execFile('npm.cmd')` 会抛 `spawn EINVAL`**：Node 18+ 对 `.cmd/.bat` 要求 `shell: true`（CVE-2024-27980 的缓解）。`core/update.js` 的 `run()` 已按 `\.(cmd|bat)$/` 自动加 `shell`，**改动那里时别把它删掉**，否则更新到依赖安装/构建这一步必失败。
+- **包管理器是 pnpm，不是 npm**：`core/update.js` 的 `detectPkgManager()` 先探测 `pnpm`，探测不到才回退 `npm`（回退是为了不让没装 pnpm 的人更新直接失败）。装依赖用 `--frozen-lockfile`，保证和 `pnpm-lock.yaml` 一致。改这里时注意 Windows 后缀（`pnpm.cmd`）。
 - **自更新不能在有本地改动时 pull**：`applyUpdate()` 先用 `git status --porcelain` 判定，脏工作区直接拒绝。这是有意为之——`git pull` 会覆盖未提交修改。别为了「让更新更顺」去掉这个判断。
 - **自更新重启分环境**（`core/update.js` 的 `restartService` / `supportsAutoRestart` / `isUnderSystemd`）：只有「Linux/macOS **且非 systemd**」才自动重启。systemd 与 Windows 都只提示用户手动重启。
   - **systemd 托管时绝不能自动重启**：本方案是 `spawn` 新进程再让主进程退出，而 systemd 见主进程退出会按 `Restart=always` 再拉一个 → 两个进程抢同一端口（EADDRINUSE）；且 spawn 出来的进程脱离 unit 的 cgroup，`systemctl status` 与 journald 日志都会失真。判据用 systemd 注入的 `INVOCATION_ID` / `JOURNAL_STREAM`（比解析 cgroup 或看父进程 pid 稳）。服务器部署见 /opt/codebuddy-proxy（unit `codebuddy-proxy.service`，端口 8318）。
@@ -142,6 +146,10 @@ GET  /api/status|/health|/session|/login*|/logout  → 各自处理
   - **必须先把 HTTP 响应写回再重启**（`routes.js` 里先 `sendJson` 再 `setTimeout` 重启），否则前端拿不到结果、只会看到连接中断。
   - 前端靠轮询 `/health` 判断服务是否回来，然后自动 `location.reload()`；60s 超时会提示用户（见 `TopBar.vue` 的 `waitForRestart`）。
 - **为什么必须重启**：`git pull` 只改磁盘文件，进程内已是旧代码。所以任何更新后都要重启，区别只在「谁来重启」（见上一条）。
+- **⚠️ 绝不要在 AWS 生产机上跑 `install` / `build`（真实事故）**：`/opt/codebuddy-proxy` 所在 EBS 只有 **8 GB 且长期 82%+ 占用**，跑 `npm run build` 会把磁盘写满，导致**整机 thrashing、SSH 都连不上**（当时连无关的 8317 服务也一起超时，最后只能从 AWS 控制台重启实例）。
+  - 正确做法：**本地 `pnpm run build` → 传 `dist/` 到服务器**（`tar czf` 后 `scp`，约 113 KB）。服务器只需 `node server.js`。
+  - 传完后若管理页仍报「需要重新构建」，是因为 `git pull` 重写了 `web/` 使 `dist/` 的 mtime 显得更旧 —— 内容是对的，`find dist -type f -exec touch {} +` 即可。
+  - 该机磁盘占用主因是 **Docker（约 2.5 G）+ journald（约 805 M）**，不是本项目。清理：`docker image prune -f`、`journalctl --vacuum-size=200M`，并已在 `/etc/systemd/journald.conf.d/limits.conf` 设 `SystemMaxUse=200M` 防止再涨。
 - **测试自更新别在真实仓库上跑**：`git pull`/`npm install` 有副作用。用 `git clone` 到临时目录再测（`scripts/test-update.js` 只测护栏与纯逻辑，不真的 pull）。
 - **token 别泄露**：任何输出/日志里 token 都要打码（用 `maskedToken` 或手动截断）；`/session` 返回明文，生产要删或加鉴权。
 - **`CODEBUDDY_DEBUG=1`** 会把最近一次 `/v1/responses` 的原始请求+转换结果 dump 到 `/tmp/codebuddy-debug-last.json`（含用户 prompt），仅调试用。

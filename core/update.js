@@ -4,7 +4,7 @@
  * 版本检查与自更新。
  *
  * - checkRemoteVersion()：从 GitHub 读取远端 package.json 的 version（只读，无副作用）
- * - applyUpdate()：git pull → npm install（仅依赖变化时）→ npm run build
+ * - applyUpdate()：git pull → pnpm install（仅依赖变化时）→ pnpm run build
  * - restartService()：类 Unix 上原地重启进程；Windows 上拒绝并让用户手动重启
  *
  * 安全约束：
@@ -29,7 +29,7 @@ const REPO = 'MrWhatHuang/CodeBuddy-API-Proxy';
 const BRANCH = process.env.CODEBUDDY_UPDATE_BRANCH || 'main';
 const VERSION_URL = `https://raw.githubusercontent.com/${REPO}/${BRANCH}/package.json`;
 
-/** 单条命令超时：git pull 与 npm install 可能较慢，给足时间 */
+/** 单条命令超时：git pull 与依赖安装可能较慢，给足时间 */
 const GIT_TIMEOUT_MS = 120000;
 const NPM_TIMEOUT_MS = 600000;
 
@@ -62,9 +62,32 @@ function run(cmd, args, { cwd = ROOT, timeoutMs = 60000, env } = {}) {
   });
 }
 
-/** npm 在 Windows 上是 npm.cmd，直接 execFile('npm') 会 ENOENT */
-function npmCmd() {
+/**
+ * 依赖安装命令。本仓库统一用 pnpm（唯一锁文件是 pnpm-lock.yaml）。
+ * Windows 上可执行文件是 pnpm.cmd，直接 execFile('pnpm') 会 ENOENT
+ * （run() 里也会对 .cmd 自动加 shell）。
+ */
+function pnpmCmd() {
+  return process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
+}
+
+/** pnpm 是否可用（未安装时回退到 npm，避免更新直接失败） */
+async function detectPkgManager() {
+  const r = await run(pnpmCmd(), ['--version'], { timeoutMs: 20000 });
+  if (r.code === 0) return 'pnpm';
+  return 'npm';
+}
+
+/** 按包管理器返回安装命令（含 Windows 后缀） */
+function installCmdFor(pm) {
+  if (pm === 'pnpm') return pnpmCmd();
   return process.platform === 'win32' ? 'npm.cmd' : 'npm';
+}
+
+/** 按包管理器返回安装参数：pnpm 用 --frozen-lockfile 保证锁文件一致 */
+function installArgsFor(pm) {
+  if (pm === 'pnpm') return ['install', '--frozen-lockfile'];
+  return ['install', '--no-audit', '--no-fund'];
 }
 
 /**
@@ -165,7 +188,7 @@ async function checkRemoteVersion() {
 }
 
 /**
- * 执行更新：git pull → 必要时 npm install → npm run build。
+ * 执行更新：git pull → 必要时 pnpm install → pnpm run build。
  * 返回分步结果，任一步失败即中止后续步骤。
  */
 async function applyUpdate() {
@@ -177,7 +200,7 @@ async function applyUpdate() {
 
   const git = await readGitState();
   if (!git.isGit) {
-    push('检查 git 仓库', false, '当前目录不是 git 仓库，无法自动更新。请手动下载最新代码后运行 npm install && npm run build。');
+    push('检查 git 仓库', false, '当前目录不是 git 仓库，无法自动更新。请手动下载最新代码后运行 pnpm install && pnpm run build。');
     return { ok: false, steps };
   }
   if (!git.hasOrigin) {
@@ -208,25 +231,29 @@ async function applyUpdate() {
   try { pkgAfter = fs.readFileSync(pkgPath, 'utf8'); } catch { /* ignore */ }
   const depsChanged = pkgBefore !== pkgAfter;
 
+  // 优先 pnpm（本仓库的唯一锁文件是 pnpm-lock.yaml）；未安装时回退 npm
+  const pm = await detectPkgManager();
+
   if (depsChanged) {
-    const inst = await run(npmCmd(), ['install', '--no-audit', '--no-fund'], { timeoutMs: NPM_TIMEOUT_MS });
+    const inst = await run(installCmdFor(pm), installArgsFor(pm), { timeoutMs: NPM_TIMEOUT_MS });
     const instOut = (inst.stdout + inst.stderr).trim();
     if (inst.code !== 0) {
-      push('npm install', false, inst.timedOut ? 'npm install 超时' : (instOut || inst.error || 'npm install 失败'));
+      const label = `${pm} install`;
+      push(label, false, inst.timedOut ? `${label} 超时` : (instOut || inst.error || `${label} 失败`));
       return { ok: false, steps };
     }
-    push('npm install', true, instOut.split('\n').slice(-6).join('\n') || '依赖已安装');
+    push(`${pm} install`, true, instOut.split('\n').slice(-6).join('\n') || '依赖已安装');
   } else {
-    push('npm install', true, 'package.json 未变化，跳过');
+    push(`${pm} install`, true, 'package.json 未变化，跳过');
   }
 
-  const build = await run(npmCmd(), ['run', 'build'], { timeoutMs: NPM_TIMEOUT_MS });
+  const build = await run(installCmdFor(pm), ['run', 'build'], { timeoutMs: NPM_TIMEOUT_MS });
   const buildOut = (build.stdout + build.stderr).trim();
   if (build.code !== 0) {
-    push('npm run build', false, build.timedOut ? '构建超时' : (buildOut || build.error || '构建失败'));
+    push(`${pm} run build`, false, build.timedOut ? '构建超时' : (buildOut || build.error || '构建失败'));
     return { ok: false, steps };
   }
-  push('npm run build', true, buildOut.split('\n').slice(-6).join('\n') || '构建完成');
+  push(`${pm} run build`, true, buildOut.split('\n').slice(-6).join('\n') || '构建完成');
 
   // 读取更新后的版本号（package.json 已在磁盘上变化，但 config.VERSION 是启动时读的）
   let newVersion = '';

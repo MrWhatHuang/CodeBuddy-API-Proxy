@@ -19,34 +19,37 @@
 
 ## 运行
 
-需要 **Node ≥ 22.5**（内置 `node:sqlite`；实测 Node 24 可用）。
+需要 **Node ≥ 22.5**（内置 `node:sqlite`；实测 Node 24 可用），包管理器用 **pnpm**（仓库唯一锁文件是 `pnpm-lock.yaml`）。
 
 ```bash
-npm install
-npm run build          # 把 web/ 构建到 dist/
-npm start              # node server.js，默认 http://127.0.0.1:3800
+pnpm install
+pnpm run build         # 把 web/ 构建到 dist/
+pnpm start             # node server.js，默认 http://127.0.0.1:3800
 ```
 
 | 脚本 | 说明 |
 |---|---|
-| `npm start` | 启动代理；管理页来自 `dist/` |
-| `npm run build` | 构建管理页 |
-| `npm run dev` | 只起 Vite（`:5173`），API 代理到 `:3800`，需另开终端 `npm start` |
-| `npm test` | 语法检查（`server.js` + `core/**` 自动遍历）+ 账号池策略回归测试 + Responses 转换层 / 版本更新回归测试（`scripts/`） |
+| `pnpm start` | 启动代理；管理页来自 `dist/` |
+| `pnpm run build` | 构建管理页 |
+| `pnpm run dev` | 只起 Vite（`:5173`），API 代理到 `:3800`，需另开终端 `pnpm start` |
+| `pnpm test` | 语法检查（`server.js` + `core/**` 自动遍历）+ 账号池策略回归测试 + Responses 转换层 / 版本更新回归测试（`scripts/`） |
+
+> **服务端本身零依赖**：`core/**` 与 `server.js` 只 `require` Node 内置模块（`http`/`fs`/`crypto`/`node:sqlite` 等），运行时不加载任何 npm 包。`node_modules` 仅用于构建前端（`vite`/`sass`/`vue` 等会被打包进 `dist/`）。
+> 因此**部署服务器可以不装依赖** —— 只要把本地构建好的 `dist/` 传上去即可；`pnpm install` 只在需要构建前端时才跑。
 
 启动后会自动打开管理页。关掉自动打开：
 
 ```bash
-CODEBUDDY_NO_OPEN=1 npm start
+CODEBUDDY_NO_OPEN=1 pnpm start
 ```
 
 也可在管理页「系统配置」里关闭「启动后自动打开管理页」。`CODEBUDDY_NO_OPEN` 优先级更高。
 
-未执行 `npm run build` 时，打开管理页会提示先构建。若拉取了最新代码但未重新构建管理页，服务端会比对 `web/` 源码与 `dist/` 产物的时间戳，并在管理页顶部提示重新构建（`npm install && npm run build` 后重启）。
+未执行 `pnpm run build` 时，打开管理页会提示先构建。若拉取了最新代码但未重新构建管理页，服务端会比对 `web/` 源码与 `dist/` 产物的时间戳，并在管理页顶部提示重新构建（`pnpm install && pnpm run build` 后重启）。
 
 ## 首次使用
 
-1. `npm install && npm run build && npm start`
+1. `pnpm install && pnpm run build && pnpm start`
 2. 打开管理页 `http://127.0.0.1:3800/home`
 3. 在「账号管理」页点「添加账号」，浏览器完成 CodeBuddy OAuth 登录（可重复添加多个账号）
 4. 把其它工具的 `base_url` 指向 `http://127.0.0.1:3800/v1` 即可调用
@@ -469,14 +472,14 @@ sqlite3 ~/.codebuddy-proxy/proxy.db "DELETE FROM admin_users; DELETE FROM admin_
 | GET | `/api/usage` | 用量记录：按时间 / 账号 / 密钥 / 模型筛选、分页，含 token 汇总 |
 | GET | `/api/usage/stats?dimension=account|apiKey` | 按天聚合的 token 用量，供首页图表 |
 | GET | `/api/update/check` | 检查 GitHub 上的最新版本（只读，不修改任何文件） |
-| POST | `/api/update/apply` | 执行自更新：`git pull` → 按需 `npm install` → `npm run build`（Linux/macOS 随后自动重启） |
+| POST | `/api/update/apply` | 执行自更新：`git pull` → 按需 `pnpm install` → `pnpm run build`（Linux/macOS 随后自动重启） |
 
 ## 版本更新提示
 
 管理页右上角的版本徽标会自动检查 GitHub 上的最新版本：
 
 - 有新版时徽标变绿并显示 `v1.1.1 → v1.2.0`，点击打开更新面板。
-- 点「立即更新」会依次执行 **`git pull` →（`package.json` 变化时）`npm install` → `npm run build`**，每步结果都显示在面板里。
+- 点「立即更新」会依次执行 **`git pull` →（`package.json` 变化时）`pnpm install` → `pnpm run build`**，每步结果都显示在面板里。（未安装 pnpm 时自动回退到 `npm install`。）
 - 版本来源是 `raw.githubusercontent.com` 上 `main` 分支的 `package.json`（无需 token，也不受 GitHub API 限流影响）。可用 `CODEBUDDY_UPDATE_BRANCH` 换分支。
 
 ### 更新后如何重启（按系统区分）
