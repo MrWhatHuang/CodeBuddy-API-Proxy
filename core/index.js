@@ -15,6 +15,7 @@ const vscode = require('./vscode');
 const routes = require('./routes');
 const checkinScheduler = require('./checkinScheduler');
 const creditScheduler = require('./creditScheduler');
+const sessionScheduler = require('./sessionScheduler');
 
 function openBrowser(url) {
   try {
@@ -58,6 +59,9 @@ function start() {
     // 每日积分快照调度器（每天 0 时后记录每个账号的积分，用于计算今日消耗）
     creditScheduler.start();
 
+    // 账号池调度器（定时切换指针 + 额度缓存刷新 + 会话绑定清理）
+    sessionScheduler.start();
+
     // 管理页鉴权：首次启动时初始化管理员密码（优先环境变量，否则生成一次性初始密码）
     let adminInitialPassword = '';
     if (!store.adminConfigured()) {
@@ -77,8 +81,13 @@ function start() {
       const pool = sessionMod.getPoolConfig();
       const active = sessionMod.getActiveAccount();
       const sourceText = sessionMod.getSessionSource() === 'vscode' ? 'VSCode 插件' : sessionMod.getSessionSource() === 'oauth' ? '网页登录' : '本地缓存';
-      console.log(`  账号池:     ${accounts.length} 个账号, 模式: ${pool.mode === 'pinned' ? '指定账号' : '池模式'}`);
+      console.log(`  账号池:     ${accounts.length} 个账号, 模式: ${pool.mode === 'pinned' ? '指定账号' : '池模式'}${pool.mode !== 'pinned' ? `, 策略: ${pool.strategy}` : ''}`);
       for (const a of accounts) console.log(`    - ${a.name || a.account.nickname || a.account.uid}${pool.pinnedId === a.id ? ' (当前指定)' : ''}`);
+      if (pool.mode !== 'pinned') {
+        console.log(`  会话粘性:   ${pool.stickyEnabled ? `已开启 (空闲 ${pool.stickyTtlMin} 分钟释放)` : '已关闭'}`);
+        console.log(`  定时切换:   ${pool.switchEnabled ? `已开启 (每 ${pool.switchIntervalMin} 分钟 ±${pool.switchJitterMin} 分钟)` : '已关闭'}`);
+        console.log(`  失败转移:   ${pool.failoverEnabled ? '已开启' : '已关闭'}`);
+      }
       console.log(`  活跃账号:   ${active ? (active.name || active.account.nickname || active.account.uid) : '-'} (来源: ${sourceText})`);
       if (vs && vs.strategy) console.log(`  解密策略:   ${vs.strategy}`);
     } else {

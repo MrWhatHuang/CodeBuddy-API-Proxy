@@ -103,11 +103,14 @@ function pipeSseToClient(clientRes, urlStr, { method = 'POST', headers = {}, bod
 
     let usage = null;
     let status = 'ok';
-    const report = () => { if (onDone) try { onDone({ usage, status }); } catch { /* ignore */ } };
+    let httpStatus = 0;
+    let errorBody = '';
+    const report = () => { if (onDone) try { onDone({ usage, status, httpStatus, errorBody }); } catch { /* ignore */ } };
 
     const upstream = mod.request(u, { method, headers: finalHeaders }, (upRes) => {
       const respHeaders = { ...(upRes.headers || {}), ...extraHeaders };
       clientRes.writeHead(upRes.statusCode || 502, respHeaders);
+      httpStatus = upRes.statusCode || 0;
       if (upRes.statusCode !== 200) status = 'error';
 
       let buf = '';
@@ -116,6 +119,8 @@ function pipeSseToClient(clientRes, urlStr, { method = 'POST', headers = {}, bod
         buf += chunk;
         // 边写边解析，尽量低延迟转发
         clientRes.write(chunk);
+        // 非 200 时把响应体留作错误诊断（用于识别额度/鉴权类错误），不额外缓存成功流
+        if (httpStatus !== 200 && errorBody.length < 4096) errorBody += chunk;
         let idx;
         while ((idx = buf.indexOf('\n\n')) !== -1) {
           const block = buf.slice(0, idx);

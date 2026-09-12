@@ -58,6 +58,7 @@ export const api = {
   deleteAccount: (id) => alova.Delete(`/api/accounts/${encodeURIComponent(id)}`),
   getPool: () => alova.Get('/api/pool'),
   setPool: (patch) => alova.Put('/api/pool', patch),
+  poolSessions: () => alova.Get('/api/pool/sessions'),
   listModels: () => alova.Get('/api/models'),
   addModel: (model) => alova.Post('/api/models', model),
   deleteModel: (id) => alova.Delete(`/api/models/${encodeURIComponent(id)}`),

@@ -164,6 +164,19 @@ function getDb() {
       updated_at   INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (account_id, date_key)
     );
+
+    -- 会话粘性绑定：把「会话指纹」钉到某个账号上，保证同一个任务（同一段对话）
+    -- 从始至终用同一个账号，避免中途换号导致上游 prompt cache 失效。
+    -- 只存会话指纹的 hash（前 16 位），不存任何消息原文。
+    CREATE TABLE IF NOT EXISTS session_bindings (
+      session_key  TEXT PRIMARY KEY,          -- 会话指纹（sha256 前 16 位 hex）
+      account_id   TEXT NOT NULL,
+      bound_at     INTEGER NOT NULL,          -- 首次绑定时间
+      last_seen_at INTEGER NOT NULL,          -- 最近一次使用时间（TTL 依据）
+      req_count    INTEGER NOT NULL DEFAULT 0 -- 该会话已转发过多少请求
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_bindings_seen ON session_bindings(last_seen_at);
+    CREATE INDEX IF NOT EXISTS idx_session_bindings_account ON session_bindings(account_id);
     `);
 
   // 兼容旧库：若 usage 表缺少 cached_tokens 列则补充
@@ -933,6 +946,99 @@ function setAccountPool(config) {
   return getAccountPool();
 }
 
+/* ---- 会话粘性绑定（session_bindings） ---- */
+
+/** 读取某个会话的绑定行：{ sessionKey, accountId, boundAt, lastSeenAt, reqCount } 或 null */
+function getSessionBinding(sessionKey) {
+  if (!sessionKey) return null;
+  try {
+    const r = getDb().prepare(
+      'SELECT session_key, account_id, bound_at, last_seen_at, req_count FROM session_bindings WHERE session_key = ?'
+    ).get(String(sessionKey));
+    if (!r) return null;
+    return {
+      sessionKey: r.session_key,
+      accountId: r.account_id,
+      boundAt: r.bound_at || 0,
+      lastSeenAt: r.last_seen_at || 0,
+      reqCount: r.req_count || 0,
+    };
+  } catch { return null; }
+}
+
+/** 写入 / 更新绑定（reqCount 递增，lastSeenAt 刷新） */
+function setSessionBinding(sessionKey, accountId, now) {
+  if (!sessionKey || !accountId) return null;
+  const ts = now || Date.now();
+  try {
+    getDb().prepare(
+      `INSERT INTO session_bindings(session_key, account_id, bound_at, last_seen_at, req_count)
+       VALUES(?, ?, ?, ?, 1)
+       ON CONFLICT(session_key) DO UPDATE SET
+         account_id = excluded.account_id,
+         last_seen_at = excluded.last_seen_at,
+         req_count = session_bindings.req_count + 1`
+    ).run(String(sessionKey), String(accountId), ts, ts);
+  } catch { return null; }
+  return getSessionBinding(sessionKey);
+}
+
+/** 只刷新 lastSeenAt（命中绑定时用，比 upsert 轻） */
+function touchSessionBinding(sessionKey, now) {
+  if (!sessionKey) return;
+  try {
+    getDb().prepare(
+      'UPDATE session_bindings SET last_seen_at = ?, req_count = req_count + 1 WHERE session_key = ?'
+    ).run(now || Date.now(), String(sessionKey));
+  } catch { /* ignore */ }
+}
+
+/** 释放单个会话绑定（任务结束时调用） */
+function deleteSessionBinding(sessionKey) {
+  if (!sessionKey) return 0;
+  try {
+    return getDb().prepare('DELETE FROM session_bindings WHERE session_key = ?').run(String(sessionKey)).changes || 0;
+  } catch { return 0; }
+}
+
+/** 释放某账号下的全部绑定（账号被删除时调用） */
+function deleteSessionBindingsByAccount(accountId) {
+  if (!accountId) return 0;
+  try {
+    return getDb().prepare('DELETE FROM session_bindings WHERE account_id = ?').run(String(accountId)).changes || 0;
+  } catch { return 0; }
+}
+
+/** 列出全部绑定（管理页排查用） */
+function listSessionBindings() {
+  try {
+    return getDb().prepare(
+      'SELECT session_key, account_id, bound_at, last_seen_at, req_count FROM session_bindings ORDER BY last_seen_at DESC'
+    ).all().map((r) => ({
+      sessionKey: r.session_key,
+      accountId: r.account_id,
+      boundAt: r.bound_at || 0,
+      lastSeenAt: r.last_seen_at || 0,
+      reqCount: r.req_count || 0,
+    }));
+  } catch { return []; }
+}
+
+/** 清理超过 ttlMs 未活动的绑定，返回删除条数 */
+function pruneSessionBindings(ttlMs) {
+  const cutoff = Date.now() - Math.max(0, ttlMs || 0);
+  try {
+    return getDb().prepare('DELETE FROM session_bindings WHERE last_seen_at < ?').run(cutoff).changes || 0;
+  } catch { return 0; }
+}
+
+/** 清空全部会话绑定（退出登录 / 清空账号池时用） */
+function deleteAllSessionBindings() {
+  try {
+    return getDb().prepare('DELETE FROM session_bindings').run().changes || 0;
+  } catch { return 0; }
+}
+
 /* ============================ 自动每日签到状态 ============================ */
 
 /** 读取某账号的签到状态：{ lastDate, nextAt } 或 null */
@@ -1210,6 +1316,10 @@ module.exports = {
 
   // 每日积分快照
   getCreditSnapshot, setCreditSnapshot, deleteCreditSnapshots,
+
+  // 会话粘性绑定
+  getSessionBinding, setSessionBinding, touchSessionBinding, deleteSessionBinding,
+  deleteSessionBindingsByAccount, listSessionBindings, pruneSessionBindings, deleteAllSessionBindings,
 
   // 自定义模型
   addModel, listModels, removeModel, getModel,
