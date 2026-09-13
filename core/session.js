@@ -103,6 +103,7 @@ function normalizePoolAccount(acct) {
     auth: n.auth,
     accounts: n.accounts,
     autoCheckin: acct.autoCheckin === undefined ? true : !!acct.autoCheckin,
+    frozen: !!acct.frozen,
     lastUsedAt: acct.lastUsedAt || 0,
     useCount: acct.useCount || 0,
     createdAt: acct.createdAt || Date.now(),
@@ -161,6 +162,7 @@ function loadFromDb() {
       auth: r.auth,
       accounts: r.accounts,
       autoCheckin: r.autoCheckin === undefined ? true : !!r.autoCheckin,
+      frozen: !!r.frozen,
       lastUsedAt: r.lastUsedAt,
       useCount: r.useCount,
       createdAt: r.createdAt,
@@ -253,6 +255,7 @@ function persistPool() {
         auth: acct.auth,
         accounts: acct.accounts,
         autoCheckin: acct.autoCheckin === undefined ? true : !!acct.autoCheckin,
+        frozen: !!acct.frozen,
         lastUsedAt: acct.lastUsedAt,
         useCount: acct.useCount,
         createdAt: acct.createdAt,
@@ -324,6 +327,7 @@ function updateAccount(id, patch) {
     if (patch.auth && typeof patch.auth === 'object') acct.auth = normalizeSession({ account: acct.account, auth: patch.auth }).auth;
     if (patch.account && typeof patch.account === 'object') acct.account = Object.assign({}, acct.account, patch.account);
     if (patch.autoCheckin !== undefined) acct.autoCheckin = !!patch.autoCheckin;
+    if (patch.frozen !== undefined) acct.frozen = !!patch.frozen;
     if (patch.lastUsedAt != null) acct.lastUsedAt = patch.lastUsedAt;
     if (patch.useCount != null) acct.useCount = patch.useCount;
     if (patch.source) acct.source = patch.source;
@@ -587,11 +591,11 @@ function pickAccountForSession(sessionKey) {
     const bound = store.getSessionBinding(sessionKey);
     if (bound) {
       const acct = getAccount(bound.accountId);
-      if (acct && acct.auth && acct.auth.accessToken && !getUnhealthy(acct.id)) {
+      if (acct && acct.auth && acct.auth.accessToken && !isAccountBlocked(acct)) {
         store.touchSessionBinding(sessionKey);
         return acct;
       }
-      // 绑定的账号已失效/不健康/被删 → 丢弃绑定，重新选
+      // 绑定的账号已失效/被冻结/不健康/被删 → 丢弃绑定，重新选
       store.deleteSessionBinding(sessionKey);
     }
   }
@@ -667,12 +671,29 @@ function pickAccountStrategy() {
   return pickRoundRobin(candidates);
 }
 
-/** 候选账号：有 accessToken 且不处于不健康冷却期 */
+/**
+ * 候选账号：有 accessToken、未被冻结、且不处于冷却期。
+ * 冻结是用户的显式意图（持久化），冷却失败转移的临时标记（内存态）；
+ * 两者效果一致——都不参与池轮询与失败转移。
+ * 若池中全部账号都不可用，则退化为「忽略冻结与冷却」，避免完全不可用。
+ */
 function healthyAccounts() {
   const valid = state.accounts.filter(function (a) { return a.auth && a.auth.accessToken; });
   const pool = valid.length ? valid : state.accounts.slice();
-  const ok = pool.filter(function (a) { return !getUnhealthy(a.id); });
-  return ok.length ? ok : pool;   // 全被标记不健康时退化为「忽略健康度」，避免完全不可用
+  const ok = pool.filter(function (a) { return !isAccountBlocked(a); });
+  return ok.length ? ok : pool;
+}
+
+/** 账号是否被冻结（持久化的显式意图） */
+function isFrozen(acct) {
+  return !!(acct && acct.frozen);
+}
+
+/** 账号是否应排除在池选号之外（冻结或处于冷却期） */
+function isAccountBlocked(acct) {
+  if (!acct) return true;
+  if (isFrozen(acct)) return true;
+  return !!getUnhealthy(acct.id);
 }
 
 /** 轮询：沿用原有 cursor 语义 */
@@ -783,9 +804,10 @@ module.exports = {
   addAccount, updateAccount, removeAccount,
   isExpiringAuth, pickAccount, markUsed, getActiveAccount,
 
-  // 会话粘性 / 策略 / 健康度 / 额度缓存
+  // 会话粘性 / 策略 / 健康度（含冻结）/ 额度缓存
   computeSessionKey, pickAccountForSession, releaseSession, bindSession,
   markUnhealthy, markHealthy, getUnhealthy, listUnhealthy,
+  isFrozen, isAccountBlocked, healthyAccounts,
   setQuotaCache, getQuotaCache, clearQuotaCache, hasQuotaData,
   pruneSessionBindings,
 

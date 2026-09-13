@@ -381,7 +381,18 @@ export default {
     creditsFail: '查询积分失败',
     todayUsed: '今日消耗',
 
+    // 冻结：不参与池轮询与失败转移（持久化）；与失败转移的临时「冷却」同一效果
+    freeze: '冻结',
+    unfreeze: '解冻',
+    freezeHint: '冻结后该账号不参与池轮询与失败转移（签到不受影响，仍会照常自动签到）；显式指定（请求头 / API 密钥绑定）仍可使用',
+    unfreezeHint: '解冻后该账号重新参与池轮询，并清除失败转移留下的冷却标记',
+    frozenBadge: '已冻结',
+    frozenHint: '已冻结：不参与池轮询与失败转移',
+    frozenOn: '已冻结账号：{name}',
+    frozenOff: '已解冻账号：{name}',
+
     // 账号池策略（会话粘性 / 定时切换 / 失败转移）
+    poolSettings: '池设置',
     strategy: '选号策略',
     strategyRoundRobin: '轮询（默认）',
     strategyQuotaWeighted: '额度加权',

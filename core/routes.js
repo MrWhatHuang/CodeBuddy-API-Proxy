@@ -53,6 +53,7 @@ function accountPublic(acct) {
     expiresInSeconds: au.expiresAt ? Math.round((au.expiresAt - Date.now()) / 1000) : 0,
     hasToken: !!au.accessToken,
     autoCheckin: acct.autoCheckin === undefined ? true : !!acct.autoCheckin,
+    frozen: !!acct.frozen,
     lastUsedAt: acct.lastUsedAt || 0,
     useCount: acct.useCount || 0,
     createdAt: acct.createdAt || 0,
@@ -96,9 +97,15 @@ function accountsPayload() {
     const st = states[acct.id];
     pub.checkinLastDate = st ? st.lastDate : '';
     pub.checkinNextAt = st ? st.nextAt : 0;
-    // 账号健康度（内存态）：处于冷却期时前端展示原因与恢复时间
-    const u = unhealthyMap[acct.id];
-    pub.unhealthy = u ? { until: u.until, reason: u.reason } : null;
+    // 可用性：冻结（持久化）优先展示，其次是失败转移留下的临时冷却（内存态）
+    if (pub.frozen) {
+      pub.unhealthy = { until: 0, reason: 'frozen' };
+    } else {
+      const u = unhealthyMap[acct.id];
+      pub.unhealthy = u ? { until: u.until, reason: u.reason } : null;
+    }
+    // 是否参与池轮询（冻结或冷却中都不参与）
+    pub.selectable = !sessionMod.isAccountBlocked(acct);
     // 额度缓存（内存态，由调度器刷新）：供策略与前端展示
     const q = sessionMod.getQuotaCache(acct.id);
     pub.usageLeft = q ? q.usageLeft : null;
@@ -664,11 +671,27 @@ async function route(req, res) {
           reqCount: b.reqCount,
         };
       });
+      // 冻结（持久化）与冷却（内存态）合并为同一份「未参与轮询的账号」列表
+      const unavailable = sessionMod.listAccounts()
+        .filter(function (a) { return sessionMod.isAccountBlocked(a); })
+        .map(function (a) {
+          const u = sessionMod.getUnhealthy(a.id);
+          const frozen = sessionMod.isFrozen(a);
+          return {
+            accountId: a.id,
+            accountName: nameOf[a.id] || a.id,
+            frozen,
+            reason: frozen ? 'frozen' : (u ? u.reason : ''),
+            until: !frozen && u ? u.until : 0,
+          };
+        });
       util.sendJson(res, 200, {
         bindings,
-        unhealthy: sessionMod.listUnhealthy().map(function (u) {
-          return { accountId: u.accountId, accountName: nameOf[u.accountId] || u.accountId, until: u.until, reason: u.reason };
-        }),
+        unavailable,
+        // 兼容旧前端字段：仅保留非冻结的冷却项
+        unhealthy: unavailable
+          .filter(function (u) { return !u.frozen; })
+          .map(function (u) { return { accountId: u.accountId, accountName: u.accountName, until: u.until, reason: u.reason }; }),
       });
     } catch (e) {
       util.sendJson(res, 500, { error: { message: e.message } });
@@ -686,12 +709,22 @@ async function route(req, res) {
         if (typeof body.name !== 'string' || !body.name.trim()) { util.sendJson(res, 400, { error: { message: 'name 不能为空' } }); return; }
         patch.name = body.name;
       }
-      if (body.autoCheckin !== undefined) patch.autoCheckin = body.autoCheckin === true || body.autoCheckin === 'true' || body.autoCheckin === 1 || body.autoCheckin === '1';
+      if (body.autoCheckin !== undefined) patch.autoCheckin = parseBoolFlag(body.autoCheckin);
+      if (body.frozen !== undefined) patch.frozen = parseBoolFlag(body.frozen);
       if (!Object.keys(patch).length) { util.sendJson(res, 400, { error: { message: '没有可更新的字段' } }); return; }
       const acct = sessionMod.updateAccount(id, patch);
       if (!acct) { util.sendJson(res, 404, { error: { message: '未找到该账号' } }); return; }
       if (patch.name) logger.log('info', 'config', '账号已重命名: ' + acct.name);
       if (patch.autoCheckin !== undefined) logger.log('info', 'config', '账号自动签到已' + (patch.autoCheckin ? '开启' : '关闭') + ': ' + acct.name);
+      if (patch.frozen !== undefined) {
+        // 冻结等价于无限期冷却：解冻时顺手清掉失败转移留下的临时冷却标记
+        if (patch.frozen) {
+          sessionMod.markUnhealthy(id, 365 * 24 * 60 * 60 * 1000, 'frozen:manual');
+        } else {
+          sessionMod.markHealthy(id);
+        }
+        logger.log('info', 'config', '账号已' + (patch.frozen ? '冻结' : '解冻') + ': ' + acct.name);
+      }
       util.sendJson(res, 200, accountPublic(acct));
     } catch (e) {
       util.sendJson(res, 400, { error: { message: '更新账号失败: ' + e.message } });

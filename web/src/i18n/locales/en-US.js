@@ -381,7 +381,18 @@ export default {
     creditsFail: 'Failed to load credits',
     todayUsed: 'Used today',
 
+    // Frozen: excluded from pool rotation and failover (persisted); same effect as a failover cooldown
+    freeze: 'Freeze',
+    unfreeze: 'Unfreeze',
+    freezeHint: 'A frozen account is excluded from pool rotation and failover (check-in is unaffected and still runs automatically). It can still be used when explicitly targeted (header / API key binding).',
+    unfreezeHint: 'Unfreezing returns the account to pool rotation and clears any failover cooldown mark.',
+    frozenBadge: 'Frozen',
+    frozenHint: 'Frozen: excluded from pool rotation and failover',
+    frozenOn: 'Account frozen: {name}',
+    frozenOff: 'Account unfrozen: {name}',
+
     // Pool strategy (sticky sessions / scheduled rotation / failover)
+    poolSettings: 'Pool settings',
     strategy: 'Selection strategy',
     strategyRoundRobin: 'Round-robin (default)',
     strategyQuotaWeighted: 'Quota-weighted',

@@ -167,6 +167,7 @@ async function tick() {
     const accounts = sessionMod.listAccounts();
     for (const acct of accounts) {
       if (!acct.auth || !acct.auth.accessToken) continue;
+      // 冻结只影响池轮询，不影响签到：冻结账号照常自动签到
       await processAccount(acct, now, day);
     }
   } catch (e) {

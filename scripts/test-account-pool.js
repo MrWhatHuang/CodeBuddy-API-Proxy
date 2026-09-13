@@ -452,6 +452,93 @@ ok('clearSession 同时清空健康度与额度缓存', () => {
   assert.strictEqual(sessionMod.getQuotaCache('a1'), null, '额度缓存应被清空');
 });
 
+console.log('\n[8] 账号冻结（不参与池轮询与失败转移）');
+
+ok('冻结的账号不出现在池轮询候选中', () => {
+  resetPool();
+  sessionMod.updateAccount('a2', { frozen: true });
+  const a2 = sessionMod.getAccount('a2');
+  assert.strictEqual(a2.frozen, true, 'frozen 应写入内存态');
+  const candidates = sessionMod.healthyAccounts();
+  assert.ok(!candidates.some((a) => a.id === 'a2'), '冻结账号不应进入候选');
+  assert.strictEqual(candidates.length, 2, '其余两个账号应仍可参与轮询');
+});
+
+ok('冻结后连续选号永远不会选中该账号', () => {
+  resetPool();
+  sessionMod.updateAccount('a2', { frozen: true });
+  const seen = new Set();
+  for (let i = 0; i < 12; i++) seen.add(sessionMod.pickAccount(null, '').id);
+  assert.ok(!seen.has('a2'), '轮询 12 次都不应选中冻结账号');
+  assert.deepStrictEqual([...seen].sort(), ['a1', 'a3'], '应只在未冻结账号间轮询');
+});
+
+ok('全部账号被冻结时退化为忽略冻结（避免完全不可用）', () => {
+  const list = resetPool();
+  for (const a of list) sessionMod.updateAccount(a.id, { frozen: true });
+  const picked = sessionMod.pickAccount(null, '');
+  assert.ok(picked, '全部冻结时仍应返回一个账号而不是 null');
+});
+
+ok('冻结持久化到数据库，重新载入后仍生效', () => {
+  resetPool();
+  sessionMod.updateAccount('a2', { frozen: true });
+  sessionMod.loadSession();   // 从 SQLite 重新载入
+  assert.strictEqual(sessionMod.getAccount('a2').frozen, true, '重启/重载后冻结状态应保留');
+  assert.strictEqual(sessionMod.getAccount('a1').frozen, false, '未冻结账号不受影响');
+});
+
+ok('冻结与冷却合并：isAccountBlocked 对两者都返回 true', () => {
+  resetPool();
+  sessionMod.updateAccount('a2', { frozen: true });
+  auth.recordUpstreamFailure('a3', 401, 'unauthorized');   // a3 进入冷却
+  assert.strictEqual(sessionMod.isAccountBlocked(sessionMod.getAccount('a2')), true, '冻结账号应被阻塞');
+  assert.strictEqual(sessionMod.isAccountBlocked(sessionMod.getAccount('a3')), true, '冷却账号应被阻塞');
+  assert.strictEqual(sessionMod.isAccountBlocked(sessionMod.getAccount('a1')), false, '正常账号不应被阻塞');
+  const candidates = sessionMod.healthyAccounts();
+  assert.deepStrictEqual(candidates.map((a) => a.id), ['a1'], '只剩未冻结未冷却的 a1');
+});
+
+ok('冻结的账号不会被会话粘性复用，绑定被丢弃', () => {
+  resetPool();
+  setPool({ stickyEnabled: true });
+  const first = sessionMod.pickAccountForSession('freezekey000001');
+  assert.ok(first, '应能选出账号');
+  sessionMod.updateAccount(first.id, { frozen: true });
+  const next = sessionMod.pickAccountForSession('freezekey000001');
+  assert.ok(next, '应重新选出可用账号');
+  assert.notStrictEqual(next.id, first.id, '不应复用已冻结的绑定账号');
+});
+
+ok('解冻后账号重新参与轮询', () => {
+  resetPool();
+  sessionMod.updateAccount('a2', { frozen: true });
+  sessionMod.updateAccount('a2', { frozen: false });
+  const seen = new Set();
+  for (let i = 0; i < 9; i++) seen.add(sessionMod.pickAccount(null, '').id);
+  assert.ok(seen.has('a2'), '解冻后应能重新被选中');
+});
+
+ok('冻结时写入冷却标记，解冻时清除（与失败转移状态合并）', () => {
+  resetPool();
+  // 模拟路由层逻辑：冻结 → 无限期冷却；解冻 → 清除冷却
+  sessionMod.updateAccount('a2', { frozen: true });
+  sessionMod.markUnhealthy('a2', 365 * 24 * 60 * 60 * 1000, 'frozen:manual');
+  assert.ok(sessionMod.getUnhealthy('a2'), '冻结应带有冷却标记');
+  assert.strictEqual(sessionMod.getUnhealthy('a2').reason, 'frozen:manual');
+  sessionMod.updateAccount('a2', { frozen: false });
+  sessionMod.markHealthy('a2');
+  assert.strictEqual(sessionMod.getUnhealthy('a2'), null, '解冻应清除冷却标记');
+});
+
+ok('显式指定账号仍可使用被冻结的账号', () => {
+  resetPool();
+  sessionMod.updateAccount('a2', { frozen: true });
+  const found = sessionMod.findAccountByIdOrName('a2');
+  assert.ok(found, '显式指定应能找到冻结账号（池选号才排除）');
+  assert.strictEqual(found.id, 'a2');
+});
+
 // 清理
 try { sessionMod.clearSession(); } catch { /* ignore */ }
 try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }

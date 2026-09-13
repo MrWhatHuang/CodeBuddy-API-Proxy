@@ -1,8 +1,9 @@
 <script setup>
-import { ref, computed } from 'vue';
+import { ref, computed, onBeforeUnmount } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useRouter } from 'vue-router';
 import { api } from '@/api';
+import Icon from '@/components/Icon.vue';
 
 const { t } = useI18n();
 const router = useRouter();
@@ -15,6 +16,7 @@ const autoCheckinSaving = ref(false);
 const loading = ref(false);
 const notice = ref('');
 const poolSaving = ref(false);
+const freezingId = ref('');
 const showSessions = ref(false);
 const sessions = ref([]);
 const sessionsUnhealthy = ref([]);
@@ -29,6 +31,10 @@ const importing = ref(false);
 const showVscode = ref(false);
 const importingVscode = ref(false);
 
+// 账号池策略设置：收起为一个设置按钮，点击后以气泡展示各项设置
+const showPoolSettings = ref(false);
+const poolSettingsRef = ref(null);
+
 // 每日签到：每个账号的签到状态，key 为账号 id
 const checkinMap = ref({});
 const checkinLoading = ref(false);
@@ -40,7 +46,10 @@ const creditsLoading = ref(false);
 
 const mode = computed({
   get: () => pool.value.mode,
-  set: (v) => setMode(v),
+  set: (v) => {
+    onModeChange(v);
+    setMode(v);
+  },
 });
 
 // 已存在从 VSCode 插件读取的账号时不重复展示「从插件读取」入口
@@ -233,9 +242,60 @@ async function openSessions() {
   }
 }
 
-/** 账号是否处于冷却期（服务端返回的内存态） */
+/** 账号池策略设置气泡：点击外部 / 按 Esc 关闭 */
+function onPoolSettingsDocClick(ev) {
+  const el = poolSettingsRef.value;
+  if (el && !el.contains(ev.target)) showPoolSettings.value = false;
+}
+function onPoolSettingsKeydown(ev) {
+  if (ev.key === 'Escape') showPoolSettings.value = false;
+}
+function togglePoolSettings() {
+  showPoolSettings.value = !showPoolSettings.value;
+  if (showPoolSettings.value) {
+    document.addEventListener('click', onPoolSettingsDocClick, true);
+    document.addEventListener('keydown', onPoolSettingsKeydown);
+  } else {
+    closePoolSettings();
+  }
+}
+function closePoolSettings() {
+  showPoolSettings.value = false;
+  document.removeEventListener('click', onPoolSettingsDocClick, true);
+  document.removeEventListener('keydown', onPoolSettingsKeydown);
+}
+// 指定账号模式下策略设置无意义，切换过去时自动收起
+function onModeChange(v) {
+  if (v === 'pinned') closePoolSettings();
+}
+onBeforeUnmount(closePoolSettings);
+
+/** 账号是否被冻结（持久化状态：冻结后不参与池轮询与失败转移） */
+function isFrozen(a) {
+  return !!(a && a.frozen);
+}
+
+/** 账号是否处于冷却期（服务端返回的内存态，失败转移标记） */
 function isUnhealthy(a) {
-  return !!(a && a.unhealthy && a.unhealthy.until > Date.now());
+  return !!(a && !a.frozen && a.unhealthy && a.unhealthy.until > Date.now());
+}
+
+/** 冻结 / 解冻账号 */
+async function toggleFreeze(acct) {
+  if (freezingId.value) return;
+  const next = !isFrozen(acct);
+  freezingId.value = acct.id;
+  try {
+    await api.setAccountFrozen(acct.id, next);
+    notice.value = next
+      ? t('accounts.frozenOn', { name: acct.name })
+      : t('accounts.frozenOff', { name: acct.name });
+    await load();
+  } catch (e) {
+    notice.value = t('common.error') + ': ' + e.message;
+  } finally {
+    freezingId.value = '';
+  }
 }
 
 /** 冷却原因转成可读文案 */
@@ -430,6 +490,167 @@ load();
           <input type="radio" value="pool" v-model="mode" />
           <span>{{ t('accounts.modePool') }}</span>
         </label>
+
+        <!-- 账号池策略设置：仅一个图标按钮，点击后在气泡中展示各项设置（池模式下才有意义） -->
+        <span v-if="pool.mode !== 'pinned'" ref="poolSettingsRef" class="pool-settings">
+          <button
+            class="btn btn-ghost btn-icon"
+            :class="{ active: showPoolSettings }"
+            :title="t('accounts.poolSettings')"
+            :aria-label="t('accounts.poolSettings')"
+            :aria-expanded="showPoolSettings ? 'true' : 'false'"
+            @click="togglePoolSettings"
+          >
+            <Icon name="settings" :size="15" />
+          </button>
+
+          <!-- 气泡：以按钮为锚点绝对定位，不参与 mode-row 的 flex 布局 -->
+          <div v-if="showPoolSettings" class="settings-pop" role="dialog" :aria-label="t('accounts.poolSettings')">
+            <div v-if="strategyDegraded" class="pop-degraded">{{ t('accounts.strategyQuotaDegraded') }}</div>
+
+            <div class="pop-row">
+              <span class="mode-label">
+                {{ t('accounts.strategy') }}
+                <span class="tip">
+                  <span class="tip-icon">?</span>
+                  <span class="tip-text">{{ t('accounts.strategyHint') }}</span>
+                </span>
+              </span>
+              <span class="pop-control">
+                <select class="input select-sm" :value="pool.strategy" :disabled="poolSaving" @change="setPoolField({ strategy: $event.target.value })">
+                  <option value="round-robin">{{ t('accounts.strategyRoundRobin') }}</option>
+                  <option value="quota-weighted">{{ t('accounts.strategyQuotaWeighted') }}</option>
+                  <option value="least-used">{{ t('accounts.strategyLeastUsed') }}</option>
+                </select>
+              </span>
+            </div>
+
+            <div class="pop-row">
+              <span class="mode-label">
+                {{ t('accounts.sticky') }}
+                <span class="tip">
+                  <span class="tip-icon">?</span>
+                  <span class="tip-text">{{ t('accounts.stickyHint') }}</span>
+                </span>
+              </span>
+              <span class="pop-control">
+                <label class="switch">
+                  <input type="checkbox" :checked="pool.stickyEnabled" :disabled="poolSaving" @change="setPoolField({ stickyEnabled: $event.target.checked })" />
+                  <span class="slider"></span>
+                </label>
+              </span>
+            </div>
+
+            <template v-if="pool.stickyEnabled">
+              <div class="pop-row">
+                <span class="mode-label">
+                  {{ t('accounts.stickyTtl') }}
+                  <span class="tip">
+                    <span class="tip-icon">?</span>
+                    <span class="tip-text">{{ t('accounts.stickyTtlHint') }}</span>
+                  </span>
+                </span>
+                <span class="pop-control">
+                  <input class="input input-num" type="number" min="1" max="1440" :value="pool.stickyTtlMin" :disabled="poolSaving" @change="setPoolNumber('stickyTtlMin', $event)" />
+                  <span class="unit">{{ t('accounts.stickyTtlUnit') }}</span>
+                </span>
+              </div>
+
+              <div class="pop-row">
+                <span class="mode-label">
+                  {{ t('accounts.stickyGranularity') }}
+                  <span class="tip">
+                    <span class="tip-icon">?</span>
+                    <span class="tip-text">{{ t('accounts.granularityHint') }}</span>
+                  </span>
+                </span>
+                <span class="pop-control">
+                  <select class="input select-sm" :value="pool.stickyGranularity" :disabled="poolSaving" @change="setPoolField({ stickyGranularity: $event.target.value })">
+                    <option value="auto">{{ t('accounts.granularityAuto') }}</option>
+                    <option value="fingerprint">{{ t('accounts.granularityFingerprint') }}</option>
+                    <option value="apikey">{{ t('accounts.granularityApikey') }}</option>
+                  </select>
+                </span>
+              </div>
+            </template>
+
+            <div class="pop-row">
+              <span class="mode-label">
+                {{ t('accounts.switchEnabled') }}
+                <span class="tip">
+                  <span class="tip-icon">?</span>
+                  <span class="tip-text">{{ t('accounts.switchHint') }}</span>
+                </span>
+              </span>
+              <span class="pop-control">
+                <label class="switch">
+                  <input type="checkbox" :checked="pool.switchEnabled" :disabled="poolSaving" @change="setPoolField({ switchEnabled: $event.target.checked })" />
+                  <span class="slider"></span>
+                </label>
+              </span>
+            </div>
+
+            <template v-if="pool.switchEnabled">
+              <div class="pop-row">
+                <span class="mode-label">
+                  {{ t('accounts.switchInterval') }}
+                  <span class="tip">
+                    <span class="tip-icon">?</span>
+                    <span class="tip-text">{{ t('accounts.switchIntervalHint') }}</span>
+                  </span>
+                </span>
+                <span class="pop-control">
+                  <input class="input input-num" type="number" min="1" max="1440" :value="pool.switchIntervalMin" :disabled="poolSaving" @change="setPoolNumber('switchIntervalMin', $event)" />
+                  <span class="unit">{{ t('accounts.stickyTtlUnit') }}</span>
+                </span>
+              </div>
+
+              <div class="pop-row">
+                <span class="mode-label">
+                  {{ t('accounts.switchJitter') }}
+                  <span class="tip">
+                    <span class="tip-icon">?</span>
+                    <span class="tip-text">{{ t('accounts.switchIntervalHint') }}</span>
+                  </span>
+                </span>
+                <span class="pop-control">
+                  <input class="input input-num" type="number" min="0" max="720" :value="pool.switchJitterMin" :disabled="poolSaving" @change="setPoolNumber('switchJitterMin', $event)" />
+                  <span class="unit">{{ t('accounts.switchJitterUnit') }}</span>
+                </span>
+              </div>
+            </template>
+
+            <div class="pop-row">
+              <span class="mode-label">
+                {{ t('accounts.failover') }}
+                <span class="tip">
+                  <span class="tip-icon">?</span>
+                  <span class="tip-text">{{ t('accounts.failoverHint') }}</span>
+                </span>
+              </span>
+              <span class="pop-control">
+                <label class="switch">
+                  <input type="checkbox" :checked="pool.failoverEnabled" :disabled="poolSaving" @change="setPoolField({ failoverEnabled: $event.target.checked })" />
+                  <span class="slider"></span>
+                </label>
+              </span>
+            </div>
+
+            <div class="pop-row">
+              <span class="mode-label">
+                {{ t('accounts.activeSessions') }}
+                <span class="tip">
+                  <span class="tip-icon">?</span>
+                  <span class="tip-text">{{ t('accounts.activeSessionsHint') }}</span>
+                </span>
+              </span>
+              <span class="pop-control">
+                <button class="btn btn-ghost btn-sm" @click="closePoolSettings(); openSessions()">{{ t('accounts.activeSessions') }}</button>
+              </span>
+            </div>
+          </div>
+        </span>
+
         <label class="radio">
           <input type="radio" value="pinned" v-model="mode" />
           <span>{{ t('accounts.modePinned') }}</span>
@@ -451,116 +672,6 @@ load();
 
       <p v-if="notice" class="hint notice">{{ notice }}</p>
 
-      <!-- 账号池策略：仅在池模式下有意义（指定账号模式完全绕过池） -->
-      <div v-if="pool.mode !== 'pinned'" class="strategy-panel">
-        <div class="strategy-row">
-          <span class="mode-label">
-            {{ t('accounts.strategy') }}
-            <span class="tip">
-              <span class="tip-icon">?</span>
-              <span class="tip-text">{{ t('accounts.strategyHint') }}</span>
-            </span>
-          </span>
-          <select class="input select-sm" :value="pool.strategy" :disabled="poolSaving" @change="setPoolField({ strategy: $event.target.value })">
-            <option value="round-robin">{{ t('accounts.strategyRoundRobin') }}</option>
-            <option value="quota-weighted">{{ t('accounts.strategyQuotaWeighted') }}</option>
-            <option value="least-used">{{ t('accounts.strategyLeastUsed') }}</option>
-          </select>
-
-          <span class="mode-label">
-            {{ t('accounts.sticky') }}
-            <span class="tip">
-              <span class="tip-icon">?</span>
-              <span class="tip-text">{{ t('accounts.stickyHint') }}</span>
-            </span>
-          </span>
-          <label class="switch">
-            <input type="checkbox" :checked="pool.stickyEnabled" :disabled="poolSaving" @change="setPoolField({ stickyEnabled: $event.target.checked })" />
-            <span class="slider"></span>
-          </label>
-
-          <template v-if="pool.stickyEnabled">
-            <span class="mode-label">
-              {{ t('accounts.stickyTtl') }}
-              <span class="tip">
-                <span class="tip-icon">?</span>
-                <span class="tip-text">{{ t('accounts.stickyTtlHint') }}</span>
-              </span>
-            </span>
-            <input class="input input-num" type="number" min="1" max="1440" :value="pool.stickyTtlMin" :disabled="poolSaving" @change="setPoolNumber('stickyTtlMin', $event)" />
-            <span class="unit">{{ t('accounts.stickyTtlUnit') }}</span>
-
-            <span class="mode-label">
-              {{ t('accounts.stickyGranularity') }}
-              <span class="tip">
-                <span class="tip-icon">?</span>
-                <span class="tip-text">{{ t('accounts.granularityHint') }}</span>
-              </span>
-            </span>
-            <select class="input select-sm" :value="pool.stickyGranularity" :disabled="poolSaving" @change="setPoolField({ stickyGranularity: $event.target.value })">
-              <option value="auto">{{ t('accounts.granularityAuto') }}</option>
-              <option value="fingerprint">{{ t('accounts.granularityFingerprint') }}</option>
-              <option value="apikey">{{ t('accounts.granularityApikey') }}</option>
-            </select>
-          </template>
-        </div>
-
-        <div class="strategy-row">
-          <span class="mode-label">
-            {{ t('accounts.switchEnabled') }}
-            <span class="tip">
-              <span class="tip-icon">?</span>
-              <span class="tip-text">{{ t('accounts.switchHint') }}</span>
-            </span>
-          </span>
-          <label class="switch">
-            <input type="checkbox" :checked="pool.switchEnabled" :disabled="poolSaving" @change="setPoolField({ switchEnabled: $event.target.checked })" />
-            <span class="slider"></span>
-          </label>
-
-          <template v-if="pool.switchEnabled">
-            <span class="mode-label">
-              {{ t('accounts.switchInterval') }}
-              <span class="tip">
-                <span class="tip-icon">?</span>
-                <span class="tip-text">{{ t('accounts.switchIntervalHint') }}</span>
-              </span>
-            </span>
-            <input class="input input-num" type="number" min="1" max="1440" :value="pool.switchIntervalMin" :disabled="poolSaving" @change="setPoolNumber('switchIntervalMin', $event)" />
-            <span class="unit">{{ t('accounts.stickyTtlUnit') }}</span>
-
-            <span class="mode-label">{{ t('accounts.switchJitter') }}</span>
-            <input class="input input-num" type="number" min="0" max="720" :value="pool.switchJitterMin" :disabled="poolSaving" @change="setPoolNumber('switchJitterMin', $event)" />
-            <span class="unit">{{ t('accounts.switchJitterUnit') }}</span>
-          </template>
-
-          <span class="mode-spacer"></span>
-
-          <span class="mode-label">
-            {{ t('accounts.failover') }}
-            <span class="tip">
-              <span class="tip-icon">?</span>
-              <span class="tip-text">{{ t('accounts.failoverHint') }}</span>
-            </span>
-          </span>
-          <label class="switch">
-            <input type="checkbox" :checked="pool.failoverEnabled" :disabled="poolSaving" @change="setPoolField({ failoverEnabled: $event.target.checked })" />
-            <span class="slider"></span>
-          </label>
-
-          <span class="mode-label">
-            {{ t('accounts.activeSessions') }}
-            <span class="tip">
-              <span class="tip-icon">?</span>
-              <span class="tip-text">{{ t('accounts.activeSessionsHint') }}</span>
-            </span>
-          </span>
-          <button class="btn btn-ghost btn-sm" @click="openSessions">{{ t('accounts.activeSessions') }}</button>
-        </div>
-
-        <p v-if="strategyDegraded" class="hint warn-text">{{ t('accounts.strategyQuotaDegraded') }}</p>
-      </div>
-
       <div v-if="loading" class="muted">{{ t('common.loading') }}</div>
       <div v-else-if="!accounts.length" class="muted">{{ t('accounts.empty') }}</div>
 
@@ -580,9 +691,10 @@ load();
             </tr>
           </thead>
           <tbody>
-            <tr v-for="a in accounts" :key="a.id" :class="{ pinned: pool.mode === 'pinned' && pool.pinnedId === a.id }">
+            <tr v-for="a in accounts" :key="a.id" :class="{ pinned: pool.mode === 'pinned' && pool.pinnedId === a.id, frozen: isFrozen(a) }">
               <td class="strong">
                 <span v-if="pool.mode === 'pinned' && pool.pinnedId === a.id" class="badge badge-primary">{{ t('accounts.pinnedBadge') }}</span>
+                <span v-if="isFrozen(a)" class="badge badge-frozen" :title="t('accounts.frozenHint')">{{ t('accounts.frozenBadge') }}</span>
                 <span v-if="isUnhealthy(a)" class="badge badge-warn" :title="unhealthyText(a)">{{ t('accounts.unhealthyBadge') }}</span>
                 {{ a.name || '-' }}
                 <div v-if="isUnhealthy(a)" class="unhealthy-note">{{ unhealthyText(a) }}</div>
@@ -611,6 +723,12 @@ load();
               <td class="ops">
                 <button class="btn btn-ghost btn-sm" :disabled="!!checkingId" @click="doCheckin(a)">{{ checkingId === a.id ? t('accounts.checkinDoing') : t('accounts.checkin') }}</button>
                 <button class="btn btn-ghost btn-sm" @click="pin(a.id)">{{ t('accounts.pin') }}</button>
+                <button
+                  class="btn btn-ghost btn-sm"
+                  :disabled="freezingId === a.id"
+                  :title="isFrozen(a) ? t('accounts.unfreezeHint') : t('accounts.freezeHint')"
+                  @click="toggleFreeze(a)"
+                >{{ isFrozen(a) ? t('accounts.unfreeze') : t('accounts.freeze') }}</button>
                 <button class="btn btn-ghost btn-sm" @click="rename(a)">{{ t('common.edit') }}</button>
                 <button class="btn btn-danger btn-sm" @click="remove(a)">{{ t('common.delete') }}</button>
               </td>
@@ -697,19 +815,52 @@ load();
 .notice { margin-top: 10px; }
 .warn-text { color: var(--warning, #d29922); }
 
-/* 账号池策略面板 */
-.strategy-panel {
-  margin: 0 0 14px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface-2);
+/* 账号池策略：设置图标按钮 + 设置气泡 */
+.pool-settings { position: relative; display: inline-flex; }
+.btn-icon { display: inline-flex; align-items: center; justify-content: center; padding: 7px; }
+.btn-icon.active { border-color: var(--primary); color: var(--primary-text); background: var(--primary-soft); }
+.settings-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  width: 380px;
+  max-width: min(92vw, 380px);
+  padding: 4px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.16);
+  text-align: left;
+  font-weight: 400;
 }
-.strategy-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.strategy-row + .strategy-row { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border); }
+/* 每个设置独立一行 */
+.pop-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0;
+}
+.pop-row + .pop-row { border-top: 1px dashed var(--border); }
+.pop-control { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+.pop-degraded {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--warning-soft, rgba(210, 153, 34, 0.16));
+  color: var(--warning, #d29922);
+  font-size: 12px;
+  line-height: 1.5;
+}
 .select-sm { width: auto; min-width: 132px; padding: 4px 8px; font-size: 13px; }
 .input-num { width: 72px; padding: 4px 8px; font-size: 13px; }
 .unit { font-size: 12px; color: var(--text-2); }
+/* 气泡内的说明气泡靠右展开，避免溢出屏幕 */
+.settings-pop .tip-text { left: auto; right: 0; width: 260px; }
+/* 冻结：整行置灰，明确「不参与池轮询」 */
+tr.frozen td { opacity: 0.6; }
+.badge-frozen { background: var(--info-soft, rgba(56, 139, 253, 0.16)); color: var(--info, #58a6ff); }
 .badge-warn { background: var(--warning-soft, rgba(210, 153, 34, 0.16)); color: var(--warning, #d29922); }
 .unhealthy-note { font-size: 11px; font-weight: 400; color: var(--warning, #d29922); margin-top: 2px; }
 

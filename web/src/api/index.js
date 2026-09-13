@@ -55,6 +55,7 @@ export const api = {
   renameAccount: (id, name) => alova.Put(`/api/accounts/${encodeURIComponent(id)}`, { name }),
   setAutoCheckin: (autoCheckin) => alova.Put('/api/accounts', { autoCheckin }),
   setAccountAutoCheckin: (id, autoCheckin) => alova.Put(`/api/accounts/${encodeURIComponent(id)}`, { autoCheckin }),
+  setAccountFrozen: (id, frozen) => alova.Put(`/api/accounts/${encodeURIComponent(id)}`, { frozen }),
   deleteAccount: (id) => alova.Delete(`/api/accounts/${encodeURIComponent(id)}`),
   getPool: () => alova.Get('/api/pool'),
   setPool: (patch) => alova.Put('/api/pool', patch),

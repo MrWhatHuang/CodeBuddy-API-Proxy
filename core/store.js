@@ -100,6 +100,7 @@ function getDb() {
       auth          TEXT NOT NULL DEFAULT '{}',    -- JSON：{ accessToken, refreshToken, domain, expiresAt, ... }
       accounts      TEXT NOT NULL DEFAULT '[]',    -- JSON：该账号可切换的子账号列表
       auto_checkin  INTEGER NOT NULL DEFAULT 1,    -- 是否开启自动每日签到（0/1，默认开启）
+      frozen        INTEGER NOT NULL DEFAULT 0,    -- 是否冻结（0/1）：冻结后不参与池轮询与失败转移
       last_used_at  INTEGER NOT NULL DEFAULT 0,
       use_count     INTEGER NOT NULL DEFAULT 0,
       created_at    INTEGER NOT NULL,
@@ -198,6 +199,13 @@ function getDb() {
     const cols = db.prepare("PRAGMA table_info(accounts)").all().map((c) => c.name);
     if (!cols.includes('auto_checkin')) {
       db.exec("ALTER TABLE accounts ADD COLUMN auto_checkin INTEGER NOT NULL DEFAULT 1");
+    }
+  } catch { /* 表不存在或已就绪则忽略 */ }
+  // 兼容旧库：若 accounts 表缺少 frozen 列则补充（默认不冻结）
+  try {
+    const cols = db.prepare("PRAGMA table_info(accounts)").all().map((c) => c.name);
+    if (!cols.includes('frozen')) {
+      db.exec("ALTER TABLE accounts ADD COLUMN frozen INTEGER NOT NULL DEFAULT 0");
     }
   } catch { /* 表不存在或已就绪则忽略 */ }
   return db;
@@ -839,6 +847,7 @@ function accountRowToObject(r) {
     auth: safeParseJson(r.auth, {}),
     accounts: safeParseJson(r.accounts, []),
     autoCheckin: r.auto_checkin === undefined ? true : !!r.auto_checkin,
+    frozen: !!r.frozen,
     lastUsedAt: r.last_used_at || 0,
     useCount: r.use_count || 0,
     createdAt: r.created_at || 0,
@@ -872,19 +881,22 @@ function insertAccount(acct) {
   const auth = acct.auth || {};
   const accounts = Array.isArray(acct.accounts) ? acct.accounts : [];
   const autoCheckin = acct.autoCheckin === undefined ? true : !!acct.autoCheckin;
+  const frozen = !!acct.frozen;
   const createdAt = Number(acct.createdAt) || Date.now();
   const now = Date.now();
   getDb().prepare(
-    'INSERT INTO accounts(id, name, source, added_by, account, auth, accounts, auto_checkin, last_used_at, use_count, created_at, updated_at) ' +
-    'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+    'INSERT INTO accounts(id, name, source, added_by, account, auth, accounts, auto_checkin, frozen, last_used_at, use_count, created_at, updated_at) ' +
+    'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
     'ON CONFLICT(id) DO UPDATE SET ' +
     'name=excluded.name, source=excluded.source, added_by=excluded.added_by, ' +
     'account=excluded.account, auth=excluded.auth, accounts=excluded.accounts, auto_checkin=excluded.auto_checkin, ' +
+    'frozen=excluded.frozen, ' +
     'last_used_at=excluded.last_used_at, use_count=excluded.use_count, updated_at=excluded.updated_at'
   ).run(
     id, name, source, addedBy,
     JSON.stringify(account), JSON.stringify(auth), JSON.stringify(accounts),
     autoCheckin ? 1 : 0,
+    frozen ? 1 : 0,
     Number(acct.lastUsedAt) || 0, Number(acct.useCount) || 0, createdAt, now
   );
   return getAccountRow(id);
@@ -897,7 +909,7 @@ function updateAccountRow(id, patch) {
   if (!existing) return null;
   const next = Object.assign({}, existing, patch);
   getDb().prepare(
-    'UPDATE accounts SET name=?, source=?, added_by=?, account=?, auth=?, accounts=?, auto_checkin=?, last_used_at=?, use_count=?, updated_at=? WHERE id=?'
+    'UPDATE accounts SET name=?, source=?, added_by=?, account=?, auth=?, accounts=?, auto_checkin=?, frozen=?, last_used_at=?, use_count=?, updated_at=? WHERE id=?'
   ).run(
     String(next.name || ''),
     String(next.source || 'file'),
@@ -906,6 +918,7 @@ function updateAccountRow(id, patch) {
     JSON.stringify(next.auth || {}),
     JSON.stringify(Array.isArray(next.accounts) ? next.accounts : []),
     next.autoCheckin === undefined ? 1 : (next.autoCheckin ? 1 : 0),
+    next.frozen ? 1 : 0,
     Number(next.lastUsedAt) || 0,
     Number(next.useCount) || 0,
     Date.now(),
