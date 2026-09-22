@@ -157,6 +157,9 @@ const pageTitle = computed(() => {
 .login-root {
   min-height: 100vh;
 }
+@media (max-width: 1280px) {
+  .content { max-width: 100%; }
+}
 @media (max-width: 820px) {
   .main { margin-left: 0; }
   .content { padding: 16px; }

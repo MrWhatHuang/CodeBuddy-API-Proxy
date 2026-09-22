@@ -12,3 +12,6 @@ yarn.lock
 # 系统
 .DS_Store
 *.log
+
+# Agent 协作流程产物（任务规格 / 验证报告），非项目代码
+.agents/

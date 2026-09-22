@@ -304,6 +304,19 @@ ERROR codex_core::tools::router: error=unsupported call: mcp__cua_repl__js
 
 想看 Codex / Cursor 等客户端到底发了什么，可在「系统配置 → 记录完整请求体」打开 `logging.requestBody`（或用 API 设置）。开启后每次请求会把**原始请求体全文**写入日志（分类 `responses` / `proxy`，条目形如 `[request body] /v1/responses 34325 bytes`），meta 里附带 `toolTypes`（各类型工具计数）与 `convertedTools`（转换后发给上游的工具名列表）。请求体可能较大且包含对话内容，默认关闭，排查完建议关掉；`logging.requestBodyMaxKb` 控制截断上限。
 
+### 实时数据（侧边栏独立菜单）
+
+管理页侧边栏「日志」下面有一项**实时数据**（`/live`）：点右上角**开始监测**后，通过 SSE（`/api/live/stream`）订阅，每次接口调用解析出请求体后立即推送过来，中间区域以**美化 JSON**（语法着色）展示完整的请求 body，并可切换「原始 / 美化」、查看请求头、复制、清空。
+
+实现要点与限制：
+
+- 事件存在**内存 ring buffer**（最多 200 条，单条 body 上限 1MB、超出按 UTF-8 字节安全截断并标记 `truncated`），进程重启即清空，不落盘。
+- 只有**通过鉴权并成功选到账号**的请求才会产生事件；被密钥校验/账号池拒绝的请求（401）不会出现在面板里。
+- 面板仅覆盖 `/v1/chat/completions`、`/v1/completions`、`/v1/embeddings` 与 `/v1/responses` 的请求体（即客户端发来的原始结构），不含上游响应体。
+- **脱敏**：请求头只下发白名单字段，`authorization` / `x-api-key` 一律替换为 `***`；请求体按敏感**键名**递归脱敏（`api_key`、`apiKey`、`authorization`、`authToken`、`access_token`、`refresh_token`、`id_token`、`password`、`secret`、`client_secret`、`cookie`、`token` 等），以及形如 `sk-` / `cb-` / `cbp-` / `ghp-` 的密钥样式值（`cb-` 即本代理自己签发的密钥形态）。
+  ⚠️ 已知限制：脱敏基于键名匹配，**键名不含上述敏感词的嵌套字段仍会原样展示**（例如 `metadata.nestedSecret`）。若你会在请求体里夹带自定义字段名的凭据，请不要使用本面板排查，或先确认已开启管理页鉴权。
+- 该接口与面板同属管理接口，受管理页鉴权保护（`/api/live/*` 在 `/api/` 前缀内，开启鉴权后需登录才能访问）。
+
 ## 环境变量
 
 启动时生效，改完需重启。`defaultModel` / `forceModel` / `autoOpen` 可被管理页里已保存的值覆盖；`CODEBUDDY_NO_OPEN` 始终禁止自动打开浏览器。
@@ -471,6 +484,9 @@ sqlite3 ~/.codebuddy-proxy/proxy.db "DELETE FROM admin_users; DELETE FROM admin_
 | DELETE | `/api/keys/:id` | 删除 API 密钥 |
 | GET | `/api/usage` | 用量记录：按时间 / 账号 / 密钥 / 模型筛选、分页，含 token 汇总 |
 | GET | `/api/usage/stats?dimension=account|apiKey` | 按天聚合的 token 用量，供首页图表 |
+| GET | `/api/live/stream?limit=100` | **实时数据**：SSE 长连接，先回放最近 `limit` 条再实时推送每次接口调用（管理页「日志」页下方面板使用） |
+| GET | `/api/live/events?limit=50` | 实时数据的一次性快照（EventSource 不可用时的回退） |
+| DELETE | `/api/live/events` | 清空实时数据的内存缓冲区 |
 | GET | `/api/update/check` | 检查 GitHub 上的最新版本（只读，不修改任何文件） |
 | POST | `/api/update/apply` | 执行自更新：`git pull` → 按需 `pnpm install` → `pnpm run build`（Linux/macOS 随后自动重启） |
 

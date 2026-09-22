@@ -6,6 +6,7 @@ const routes = [
   { path: '/models', name: 'models', component: () => import('@/views/ModelsView.vue'), meta: { title: 'models' } },
   { path: '/accounts', name: 'accounts', component: () => import('@/views/AccountsView.vue'), meta: { title: 'accounts' } },
   { path: '/logs', name: 'logs', component: () => import('@/views/LogsView.vue'), meta: { title: 'logs' } },
+  { path: '/live', name: 'live', component: () => import('@/views/LiveView.vue'), meta: { title: 'live' } },
   { path: '/apikeys', name: 'apikeys', component: () => import('@/views/ApiKeysView.vue'), meta: { title: 'apikeys' } },
   { path: '/usage', name: 'usage', component: () => import('@/views/UsageView.vue'), meta: { title: 'usage' } },
   { path: '/settings', name: 'settings', component: () => import('@/views/SettingsView.vue'), meta: { title: 'settings' } },

@@ -22,6 +22,7 @@ const checkinScheduler = require('./checkinScheduler');
 const credits = require('./credits');
 const adminAuth = require('./adminAuth');
 const updater = require('./update');
+const live = require('./live');
 
 /* ============================ 状态对象 ============================ */
 
@@ -444,6 +445,30 @@ async function route(req, res) {
     return;
   }
 
+  /* ---- 实时数据（Live Monitor） ---- */
+  // SSE 长连接：ready → 历史回放 → 实时推送 → 15s 注释心跳，断开时清理订阅。
+  if (pathname === '/api/live/stream' && method === 'GET') {
+    const limit = parseInt(u.searchParams.get('limit'), 10) || 100;
+    live.subscribe(res, { limit });
+    // 客户端断开（或服务端主动 end）时注销订阅 + 清心跳，避免订阅者泄漏
+    const cleanup = () => live.unsubscribe(res);
+    req.on('close', cleanup);
+    res.on('close', cleanup);
+    return;
+  }
+  // 一次性快照：REST 回退方案（EventSource 不可用时前端轮询用）
+  if (pathname === '/api/live/events' && method === 'GET') {
+    const limit = parseInt(u.searchParams.get('limit'), 10) || 50;
+    util.sendJson(res, 200, { events: live.snapshot(limit), stats: live.stats() });
+    return;
+  }
+  if (pathname === '/api/live/events' && method === 'DELETE') {
+    live.clear();
+    logger.log('info', 'system', '实时数据已清空');
+    util.sendJson(res, 200, { ok: true });
+    return;
+  }
+
   /* ---- 日志统计 ---- */
   if (pathname === '/api/stats') {
     const s = store.stats();
@@ -855,6 +880,9 @@ async function route(req, res) {
   }
 
   util.sendJson(res, 404, { error: { message: `Not Found: ${method} ${pathname}` } });
+  // 兜底：SSE 长连接之外的路径若意外挂上了订阅（例如未来新增的收尾分支），
+  // 这里保证订阅者集合不会被写坏的 res 长期占住。
+  live.unsubscribe(res);
 }
 
 module.exports = { route, statusObject, setActiveServer };

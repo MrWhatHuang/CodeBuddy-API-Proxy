@@ -14,6 +14,7 @@ const util = require('./util');
 const auth = require('./auth');
 const openai = require('./openai');
 const sessionMod = require('./session');
+const live = require('./live');
 
 // CodeBuddy 后端的内容过滤器会拦截含 "Codex"/"OpenAI" 等竞品品牌词的系统提示词，
 // 返回 11128 "Illegal API invocation from an unapproved channel"。这里做净化以绕过。
@@ -742,6 +743,22 @@ async function handleResponses(req, res) {
 
   let accountId = acct ? acct.id : '';
   let accountName = acct ? (acct.name || (acct.account && (acct.account.nickname || acct.account.uid)) || '') : '';
+
+  // 实时数据埋点：必须放在 accountId/accountName 声明之后（否则 TDZ 报错），
+  // 也刻意不引用后面才声明的 startedAt。
+  live.publish({
+    source: '/v1/responses',
+    kind: 'responses',
+    model: payload.model || chatPayload.model || '',
+    stream: !!payload.stream,
+    accountId,
+    accountName,
+    apiKeyId: keyCheck.keyId || '',
+    apiKeyName: keyCheck.keyName || '',
+    headers: util.clientHeaders(req),
+    ...util.parseBodyForLive(body),
+  });
+
   const record = (usage, status) => {
     const cached =
       (usage && usage.prompt_cache_hit_tokens) ||

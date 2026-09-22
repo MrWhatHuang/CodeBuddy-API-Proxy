@@ -11,6 +11,7 @@ const items = [
   { name: 'models', icon: 'models', labelKey: 'models', to: '/models' },
   { name: 'accounts', icon: 'accounts', labelKey: 'accounts', to: '/accounts' },
   { name: 'logs', icon: 'logs', labelKey: 'logs', to: '/logs' },
+  { name: 'live', icon: 'live', labelKey: 'live', to: '/live' },
   { name: 'settings', icon: 'settings', labelKey: 'settings', to: '/settings' },
 ];
 </script>

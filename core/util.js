@@ -179,6 +179,135 @@ function readBody(req) {
   });
 }
 
+/** 「实时数据」请求头白名单：只下发这些无关机密的头，其余一律不下发 */
+const LIVE_HEADER_WHITELIST = [
+  'content-type', 'accept', 'authorization', 'x-api-key', 'user-agent', 'host',
+  'content-length', 'x-session-id', 'x-codebuddy-account', 'x-account-id', 'x-account-name',
+];
+/** 请求头值的展示上限，避免超长 UA / Cookie 撑爆事件 */
+const LIVE_HEADER_VALUE_MAX = 512;
+
+/**
+ * 请求体脱敏：这些键名的值一律替换成 '***'。
+ * 客户端凭据可能出现在请求体里（Continue / Cline / Roo 等客户端会发 api_key / authToken），
+ * 而本代理会把这些字段原样转发给上游，因此实时面板必须同样脱敏，否则
+ * GET /api/live/events 会把明文密钥回显。
+ * 只匹配「整段等于或结尾等于」这些词，避免误伤 max_tokens、tokens 之类的正常字段。
+ */
+const LIVE_SECRET_KEY_RE = /(^|_|\b)(api[_-]?key|apikey|authorization|auth[_-]?token|access[_-]?token|refresh[_-]?token|id[_-]?token|password|passwd|secret|client[_-]?secret|cookie|token)$/i;
+/**
+ * 值形如已知密钥前缀的长串：即使键名不在上面的名单里也脱敏。
+ * 含本项目自己的 `cb-<48hex>` 形态（store.js 的 generateApiKey）——客户端把配置
+ * dump 进请求体时，会把一把仍然有效的密钥写进 ring buffer，这里一并拦掉。
+ */
+const LIVE_SECRET_VALUE_RE = /^(sk|pk|cb|cbp|ghp|gho|xox[baprs])[-_][A-Za-z0-9_\-]{8,}$/;
+const LIVE_MASK = '***';
+const LIVE_MASK_DEPTH = 12;
+
+/** 递归脱敏：命中敏感键名或密钥样式值的一律替换为 '***' */
+function maskSecrets(value, depth) {
+  if (depth > LIVE_MASK_DEPTH) return value;
+  if (Array.isArray(value)) return value.map((v) => maskSecrets(v, depth + 1));
+  if (!value || typeof value !== 'object') return value;
+
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (LIVE_SECRET_KEY_RE.test(k)) { out[k] = LIVE_MASK; continue; }
+    if (typeof v === 'string' && LIVE_SECRET_VALUE_RE.test(v)) { out[k] = LIVE_MASK; continue; }
+    out[k] = maskSecrets(v, depth + 1);
+  }
+  return out;
+}
+
+/** 收集客户端请求头（白名单 + 脱敏），供「实时数据」展示 */
+function clientHeaders(req) {
+  const out = {};
+  try {
+    const h = (req && req.headers) || {};
+    for (const key of LIVE_HEADER_WHITELIST) {
+      const raw = h[key];
+      if (raw === undefined || raw === null) continue;
+      // authorization / x-api-key 一律改写，绝不回显任何真实密钥
+      if (key === 'authorization' || key === 'x-api-key') { out[key] = '***'; continue; }
+      const value = Array.isArray(raw) ? raw.join(', ') : String(raw);
+      out[key] = value.length > LIVE_HEADER_VALUE_MAX ? value.slice(0, LIVE_HEADER_VALUE_MAX) : value;
+    }
+  } catch { /* 请求头异常不能影响代理主流程 */ }
+  return out;
+}
+
+/**
+ * 按 UTF-8 字节数安全截断字符串：不切碎多字节字符，返回结果 <= maxBytes 字节。
+ * Buffer#subarray 会在字符中间切断，残留字节解码为 U+FFFD（3 字节），
+ * 使「截断后」反而比上限更大，所以需要根据末字节判断需要回退几个字节。
+ * （与 core/responses.js 的同名逻辑一致，这里独立实现以免跨模块耦合）
+ */
+function truncateUtf8Bytes(text, maxBytes) {
+  if (maxBytes <= 0) return '';
+  const buf = Buffer.from(text);
+  if (buf.length <= maxBytes) return text;
+
+  // 从 maxBytes 往前找第一个 UTF-8 前导字节（非 10xxxxxx 续字节），
+  // 并确认该字符的完整字节数能放进 maxBytes，否则继续回退。
+  let end = maxBytes;
+  while (end > 0) {
+    const b = buf[end];
+    if (b === undefined || (b & 0xc0) !== 0x80) break; // 找到下一个字符的起始
+    end--;
+  }
+  return buf.subarray(0, end).toString('utf8');
+}
+
+/**
+ * 把 Buffer / string 安全转成可发送的 { body, bodyText, bodyBytes, truncated, parseError }。
+ * 供「实时数据」事件使用：任何输入（超大 / 非 JSON / undefined）都不抛异常。
+ * bodyBytes 是客户端原始请求体的真实字节数；bodyText 是实际下发的文本。
+ */
+function parseBodyForLive(raw) {
+  const result = { body: null, bodyText: '', bodyBytes: 0, truncated: false, parseError: null };
+  try {
+    if (raw === undefined || raw === null) return result;
+
+    let text;
+    if (Buffer.isBuffer(raw)) {
+      result.bodyBytes = raw.length;
+      text = raw.toString('utf8');
+    } else {
+      text = typeof raw === 'string' ? raw : String(raw);
+      result.bodyBytes = Buffer.byteLength(text);
+    }
+
+    const maxBytes = 1024 * 1024; // MAX_BODY_BYTES：单条事件上限 1MB
+    if (result.bodyBytes > maxBytes) {
+      result.truncated = true;
+      text = truncateUtf8Bytes(text, maxBytes);
+    }
+    result.bodyText = text;
+
+    // 空体（比如没有 body 的请求）不算错误，body 保持 null
+    if (text.trim()) {
+      try {
+        const parsed = JSON.parse(text);
+        // 只接受对象/数组：`123` / `"str"` 这类合法但无意义的 JSON 视为 body=null
+        if (parsed && typeof parsed === 'object') {
+          // 脱敏后再下发：body 与 bodyText 必须同源，否则前端「原始/美化」切换会漏出明文
+          const masked = maskSecrets(parsed, 0);
+          result.body = masked;
+          result.bodyText = JSON.stringify(masked);
+        } else {
+          result.parseError = '请求体不是 JSON 对象/数组';
+        }
+      } catch (e) {
+        result.parseError = `JSON 解析失败: ${(e && e.message) || 'unknown'}`;
+      }
+    }
+  } catch (e) {
+    // 兜底：任何意外都不向调用方抛异常，否则代理主流程会被埋点带崩
+    result.parseError = `解析请求体失败: ${(e && e.message) || 'unknown'}`;
+  }
+  return result;
+}
+
 function corsHeaders() {
   let origin = '*';
   try { origin = require('./store').getCorsOrigin() || '*'; } catch { /* store 尚未就绪 */ }
@@ -257,6 +386,7 @@ function genId(prefix) {
 
 module.exports = {
   requestJson, requestRaw, pipeToClient, pipeSseToClient, readBody,
+  clientHeaders, parseBodyForLive,
   sendJson, sendHtml, sendFile, MIME_TYPES, corsHeaders,
   escapeHtml, maskedToken, genId,
 };

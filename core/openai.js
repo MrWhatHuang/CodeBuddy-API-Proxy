@@ -8,6 +8,7 @@ const logger = require('./logger');
 const util = require('./util');
 const auth = require('./auth');
 const sessionMod = require('./session');
+const live = require('./live');
 // 仅用于复用请求体日志（logRequestBody 内部按配置判断是否写入，无循环依赖：
 // responses.js 引用 openai.js 的 aggregateSseToCompletion 是运行时延迟引用）
 const responses = require('./responses');
@@ -124,6 +125,21 @@ async function handleProxy(req, res, pathname) {
 
   let accountId = acct ? acct.id : '';
   let accountName = acct ? (acct.name || (acct.account && (acct.account.nickname || acct.account.uid)) || '') : '';
+
+  // 实时数据埋点：payload 已定稿（含 model/stream），accountId/accountName 也已确定。
+  // 注意必须放在 accountId/accountName 声明之后，否则会触发 TDZ 错误。
+  live.publish({
+    source: pathname,
+    kind: 'openai',
+    model: payload.model || '',
+    stream: isStream,
+    accountId,
+    accountName,
+    apiKeyId: keyCheck.keyId || '',
+    apiKeyName: keyCheck.keyName || '',
+    headers: util.clientHeaders(req),
+    ...util.parseBodyForLive(body),
+  });
 
   // 记录一次用量
   const record = (usage, status) => {
