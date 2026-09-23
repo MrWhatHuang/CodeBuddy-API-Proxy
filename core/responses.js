@@ -12,9 +12,21 @@ const store = require('./store');
 const logger = require('./logger');
 const util = require('./util');
 const auth = require('./auth');
-const openai = require('./openai');
 const sessionMod = require('./session');
 const live = require('./live');
+
+// openai.js 与 responses.js 互相引用（openai.js 末尾 require('./responses') 复用
+// 请求体日志），且 routes.js 先加载 openai.js：
+// openai.js 回头加载本模块时，它自己的 module.exports 还是空的，若此处用顶层
+// require 捕获，拿到的会是永远为空的对象（Node 会打印
+// "Accessing non-existent property ... inside circular dependency"），
+// 导致 aggregateSseToCompletion 在运行时是 undefined，/v1/responses 非流式恒 502。
+// 因此改成惰性引用：只在真正调用时（两个模块都已加载完成）才去 require。
+let _openai = null;
+function aggregateSseToCompletion(sseText) {
+  if (!_openai) _openai = require('./openai');
+  return _openai.aggregateSseToCompletion(sseText);
+}
 
 // CodeBuddy 后端的内容过滤器会拦截含 "Codex"/"OpenAI" 等竞品品牌词的系统提示词，
 // 返回 11128 "Illegal API invocation from an unapproved channel"。这里做净化以绕过。
@@ -715,6 +727,11 @@ async function handleResponses(req, res) {
   if (cfg.forceModel) chatPayload.model = cfg.forceModel;
   chatPayload.stream = true; // CodeBuddy 只支持流式
 
+  // 思考强度归一化。Responses API 的 reasoning:{effort} 上游并不认，必须转成
+  // `reasoning_effort` 字符串；同时它会原样透传 unsupported 的 reasoning 对象，
+  // 因此这里统一清洗（详见 util.resolveReasoningEffort）。
+  util.resolveReasoningEffort(chatPayload, cfg.defaultReasoningEffort);
+
   const timeoutMs = store.getRequestTimeoutMs();
   logger.log('info', 'responses', `model=${payload.model || chatPayload.model} stream=${!!payload.stream} messages=${chatPayload.messages.length}`, logger.requestSummary(payload, { messages: chatPayload.messages.length }));
 
@@ -798,7 +815,7 @@ async function handleResponses(req, res) {
       const ct = (r.headers && r.headers['content-type']) || '';
       if (ct.includes('text/event-stream') || r.body.includes('chat.completion.chunk')) {
         auth.recordUpstreamSuccess(accountId);
-        const completion = openai.aggregateSseToCompletion(r.body);
+        const completion = aggregateSseToCompletion(r.body);
         logger.log('info', 'responses', `完成 (${Date.now() - startedAt}ms)`, logger.requestSummary(payload, { stream: false, durationMs: Date.now() - startedAt, tokens: completion.usage && completion.usage.total_tokens }));
         record(completion.usage, 'ok');
         util.sendJson(res, 200, chatCompletionToResponse(completion, payload));
@@ -819,7 +836,7 @@ async function handleResponses(req, res) {
                 const rct = (retry.headers && retry.headers['content-type']) || '';
                 if (retry.status === 200 && (rct.includes('text/event-stream') || retry.body.includes('chat.completion.chunk'))) {
                   auth.recordUpstreamSuccess(accountId);
-                  const completion = openai.aggregateSseToCompletion(retry.body);
+                  const completion = aggregateSseToCompletion(retry.body);
                   logger.log('info', 'responses', `换号后完成 (${Date.now() - startedAt}ms)`, logger.requestSummary(payload, { stream: false, status: 200, durationMs: Date.now() - startedAt }));
                   record(completion.usage, 'ok');
                   util.sendJson(res, 200, chatCompletionToResponse(completion, payload));

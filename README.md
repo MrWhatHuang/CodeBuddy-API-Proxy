@@ -278,6 +278,110 @@ codex exec "你的任务"
 - **usage**：主动带 `stream_options: { include_usage: true }`，确保流式末块带上 token 用量。
 - 上游对 `temperature` / `top_p` / `stop` / `presence_penalty` / `response_format` 等参数**静默忽略**（不报错也不生效），`tools` / `messages` / 数组形式的 `content` 则正常支持。
 
+#### 思考强度 / 思维链（`reasoning_effort`）
+
+**上游只有在请求里带一个非空的 `reasoning_effort` 字符串时才会返回 `reasoning_content`；不带该字段时思考是关闭的**（实测 `deepseek-v4-pro` / `deepseek-v4-flash` 不带该字段时 `reasoning_content` 恒为空串）。同时上游是 Go 服务，把该字段声明为 `string`：
+
+| 客户端传法 | 上游结果 |
+|---|---|
+| 不传 / `null` / `""` | 200，但**不返回思维链** |
+| `"low"` / `"medium"` / `"high"`（任意非空字符串） | 200，正常返回 `reasoning_content` |
+| `true` / `1` / `{}` / `["high"]` | **400** `11101 cannot unmarshal ... into Go struct field Request.reasoning_effort of type string` |
+
+官方插件（`tencent-cloud.coding-copilot`）的做法是：先按模型配置里的 `reasoning.supportedEfforts` / `effort` / `defaultEffort` 解析出档位，写入 `providerOptions`，最终作为 `reasoning_effort` 发出；**解析不出档位时整个字段不发**。
+
+代理按同样思路统一归一化，兼容各家客户端的不同写法：
+
+| 客户端写法 | 实际发给上游 |
+|---|---|
+| `reasoning_effort: "high"` | `"high"`（原文透传） |
+| `reasoning: { effort: "low" }` | `"low"` |
+| `reasoning_effort: 1…5` | `"minimal"` / `"low"` / `"medium"` / `"high"` / `"high"` |
+| `thinking: { type: "enabled" }`、`reasoning_effort: true` | 默认档位（`defaultReasoningEffort`） |
+| **什么都没传** | 默认档位（`defaultReasoningEffort`，默认 `medium`） |
+| `reasoning_effort: ""` / `"none"` / `"off"`、`reasoning: false`、`thinking: {type:"disabled"}` | **不发该字段**（思考关闭） |
+| `reasoning: { max_tokens: 2000 }` 等无法解析的 | 不发该字段 |
+
+所有别名（`reasoning` / `thinking` / `enableThinking` / `reasoningEffort`）都会被清理，只保留一个干净的 `reasoning_effort` 字符串，避免残留的 bool / 对象透传到上游撞 400。`/v1/chat/completions` 与 `/v1/responses` 走同一套逻辑（`core/util.js` 的 `resolveReasoningEffort`）。
+
+> 想让思考链**默认关闭**（例如省 token），把 `defaultReasoningEffort` 设为空串即可；此时只有客户端显式指定档位才会开启思考。
+
+**档位不是任意字符串**：上游按模型校验 `reasoning_effort` 的取值。`max` 本身是合法档位（实测 `deepseek-v4.1-flash` 等均接受），但拼错的档位会被上游拒绝：
+
+| 客户端传法 | 上游结果 |
+|---|---|
+| `"max"` | 200，正常思考 |
+| `"maximal"` / 其它未支持的值 | **400** `11150 invalid_reasoning_effort`（"the reasoning effort value is not supported by the current model"） |
+
+上游的 400 响应体是 `{code, msg, extError, displayMsg}` 形状，**没有 OpenAI 的顶层 `error` 字段**。这会让 `openai` SDK 无法从响应体里取出 `error.message`，从而退化成无信息的 `"400 status code (no body)"`（见 `openai/core/error.js` 的 `APIError.makeMessage`）。
+
+这个字符串会连带触发下游客户端的**误诊**：pi-ai（dsh 的 LLM 层）把正则 `/^4(?:00|13)\s*(?:status code)?\s*\(no body\)/i` 当作「上下文超限」（该规则原本是为 Cerebras 写的），于是 dsh 把这类 400 一律上报为 `CONTEXT_WINDOW_EXCEEDED` 并尝试压缩上下文——但真实原因是档位不合法，与上下文长度无关。
+
+排查建议：
+- 在 dsh 里看到 `400 status code (no body)` + `CONTEXT_WINDOW_EXCEEDED` 时，**先怀疑请求参数而不是上下文**。
+- 打开管理页「系统配置 → 记录完整请求体」（`logging.requestBody`）后在「日志」里查 `status=400`，即可看到上游 `code`（如 `11150`）。
+- 确认该模型的档位名：`deepseek-v4.1-flash` 的 `reasoningEfforts` 在 `~/.dsh/settings.yaml` 中声明（`off` / `low` / `high` / `max`），dsh 只会发送其中已声明的档位。
+
+#### `max_completion_tokens` 被上游静默忽略（不报 400，但限长失效）
+
+上游 `/v2/chat/completions` 只认 `max_tokens`。**`max_completion_tokens` 既不会报错，也不会生效**——它被整个忽略（实测传字符串、对象、数组、负数、`null`、`0` 都返回 200）：
+
+| 请求 | 实际输出 | `finish_reason` |
+|---|---|---|
+| `max_tokens: 30` | 56 字符（被截断） | `length` |
+| `max_completion_tokens: 30` | 923 字符（**未截断**） | `stop` |
+
+危险之处在于**它不报错**：客户端以为限了长，实际完全不限。配上高档位思考时尤其明显——`reasoning_effort: "max"` + `max_completion_tokens: 30` 实测产出 **526 个 thinking token**，远超调用方要求的 30。
+
+代理的 `/v1/responses` 路径已经把 `max_output_tokens` 映射成 `max_tokens`（`core/responses.js`），但 **`/v1/chat/completions` 路径没有对应映射**，会把 `max_completion_tokens` 原样透传给上游并被丢弃。只发 `max_completion_tokens` 的第三方客户端因此会「限长失效」。
+
+> 排查提示：如果怀疑是 `max_completion_tokens` 导致的 400，可以排除这一项——**它不会引起 400**。真正会撞 400 的是 `reasoning_effort` 的**类型**错误（`true` / 数字 / 对象 → `11101 cannot unmarshal ... into Go struct field`）或**取值**错误（未支持的档位 → `11150 invalid_reasoning_effort`）。
+
+#### `role: "developer"` 会被上游拒绝（400 `11128`）
+
+上游**不认 OpenAI 的 `developer` 角色**；`system` 正常，`developer` 直接 400：
+
+| `messages[0].role` | 上游结果 |
+|---|---|
+| `system` | 200 |
+| `developer` | **400** `11128 Illegal API invocation from an unapproved channel` |
+
+这个坑很容易踩到，因为 **pi-ai（dsh 的 LLM 层）会在模型带 `reasoning` 时自动把系统提示词发成 `developer` 角色**：
+
+```js
+// @earendil-works/pi-ai/dist/api/openai-completions.js
+const useDeveloperRole = model.reasoning && compat.supportsDeveloperRole;
+const role = useDeveloperRole ? "developer" : "system";
+```
+
+而 `supportsDeveloperRole` 对**自定义 baseURL 网关**（非 OpenAI/OpenRouter 等已知 provider）默认判定为 `true`（同上文件 `detected.supportsDeveloperRole`），所以「自定义网关 + 推理模型」= 必然发出 `developer`。典型触发场景是 dsh 的**会话标题生成**请求：它把标题提示词作为独立的 `system` 传入，经 pi-ai 转换后就变成 `developer`，于是标题生成固定失败。
+
+为什么「勾了思考强度」就必然触雷，整条链路如下（已对照 dsh 源码与 pi-ai 0.85.1 逐段核实）：
+
+1. **思考强度 → `reasoning: true`**：`reasoningEfforts` 一旦声明了 `off` 以外的档位，dsh 就把模型物化成 `reasoning: true`（`packages/llm/llm-pi-ai/src/catalog.ts` 的 `resolveModelReasoning`）。所以「选了思考强度」= 该模型 `reasoning` 为真。
+2. **`reasoning: true` → 发 `developer`**：pi-ai 用 `model.reasoning && compat.supportsDeveloperRole` 决定系统提示词的角色（`openai-completions.js:910`）。
+3. **没有 compat → 默认 `true`**：dsh 只有在 profile 显式配置了 compat 字段时才把 compat 传给 pi-ai，一个都没配置时直接返回 `{}`（`catalog.ts:789` 的 `resolveModelCompat`），于是 pi-ai 回落到按 baseURL 推断，而 `http://127.0.0.1:3800/v1` 不匹配任何已知厂商 → `isNonStandard = false` → `supportsDeveloperRole = true`。
+
+dsh 自己的类型注释就写明了这层耦合（`llm-pi-ai/src/catalog.ts`）：
+
+```
+/**
+ * Whether the endpoint accepts the `developer` role for the system prompt,
+ * which pi-ai sends only to a reasoning model; `false` keeps `system`.
+ */
+supportsDeveloperRole?: boolean
+```
+
+**所以默认配置下，只要模型开了思考，系统提示词就一定是 `developer`** —— 与本代理的能力无关，纯粹是「自定义网关默认值」与本上游不支持该角色撞在一起。
+
+**代理已自动处理**：`/v1/chat/completions` 入口会调用 `util.normalizeDeveloperRole`，把 `developer` 就地改写成 `system`（顺序、内容原样保留，只换角色名），因此下游客户端无需任何配置。`/v1/responses` 路径本来就做过同样的映射（`responsesToChatInput`），这次是补齐 chat 路径。
+
+如果仍想从客户端侧规避（例如绕过本代理直连其它上游）：
+- 在 `~/.dsh/settings.yaml` 对应 provider 下加 `compat: { supportsDeveloperRole: false }`，pi-ai 就会退回 `system`。
+- 或关掉思考（不设 `reasoningEfforts`），但这就等于放弃思维链，不推荐。
+
+> 注：请求里的 `store: false`、`stream_options` 都无害（实测 200），不必动。
+
 #### 已知限制：Codex 的 namespace 子工具（浏览器 / 子代理）无法调用
 
 用非 OpenAI 官方 provider（即 `wire_api = "responses"` 的自定义 base_url，也就是本代理这种用法）时，**Codex 自己不会把 `namespace` 里的子工具注册成可调用项**。表现是模型发起调用后 Codex 打印：
@@ -334,6 +438,7 @@ ERROR codex_core::tools::router: error=unsupported call: mcp__cua_repl__js
 | `CODEBUDDY_TZ` | `Asia/Shanghai` | 自动签到使用的时区（按该时区的自然日与 05:00–09:00 窗口） |
 | `CODEBUDDY_FORCE_MODEL` | 空 | 强制替换请求 model |
 | `CODEBUDDY_DEFAULT_MODEL` | `default` | 缺省 model |
+| `CODEBUDDY_DEFAULT_REASONING_EFFORT` | `medium` | 默认思考强度（留空 = 思考默认关闭），见「思考强度 / 思维链」 |
 | `CODEBUDDY_API_KEY` | 空 | 兼容旧版：指定单个 API 密钥（首次启动时迁移进 API 密钥表）。也可在管理页「API 密钥」里管理多个密钥 |
 | `CODEBUDDY_NO_OPEN` | 空 | 设置则不自动打开管理页 |
 | `CODEBUDDY_ADMIN_USERNAME` | `admin` | 管理页鉴权的管理员用户名 |
@@ -356,6 +461,7 @@ curl -X PUT http://127.0.0.1:3800/api/config \
     "autoOpen": true,
     "defaultModel": "default",
     "forceModel": "",
+    "defaultReasoningEffort": "medium",
     "requestTimeoutMs": 300000,
     "corsOrigin": "*"
   }'
@@ -380,6 +486,7 @@ curl -X PUT http://127.0.0.1:3800/api/config -H "Content-Type: application/json"
 | `autoOpen` | `true` | 启动后自动打开管理页 |
 | `defaultModel` | `default` | 请求未带 `model` 时使用 |
 | `forceModel` | 空 | 非空则覆盖所有请求的 `model` |
+| `defaultReasoningEffort` | `medium` | 客户端未指定思考强度时使用的档位，见下方「思考强度 / 思维链」；留空 = 不主动添加该字段 |
 | `requestTimeoutMs` | `300000` | 上游超时（1s–30min） |
 | `corsOrigin` | `*` | `Access-Control-Allow-Origin` |
 | `apiKeyEnabled` | `true` | 是否校验客户端访问 `/v1` 与 `/responses` 所需的 API 密钥 |

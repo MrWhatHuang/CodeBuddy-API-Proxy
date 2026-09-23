@@ -9,6 +9,12 @@
  *   2. delta.reasoning 为对象时，?? 级联短路导致思维链静默丢失；
  *   3. logRequestBody 按字符截断字节上限，中文请求体严重超限。
  *
+ * 另外覆盖两类「思考链丢失 / 400」回归：
+ *   4. openai.js 与 responses.js 循环依赖导致 aggregateSseToCompletion 为
+ *      undefined，/v1/responses 非流式恒 502；
+ *   5. 思考强度未归一化：上游只认 reasoning_effort 字符串，传 bool 等会 400，
+ *      且不传该字段时上游不返回 reasoning_content。
+ *
  * 不依赖网络与登录态：起一个 mock 上游 + 假的 client res，直接驱动 handleResponses。
  */
 
@@ -73,6 +79,124 @@ check('reasoning 三种写法都能取到内容（含对象形式）', () => {
   assert.strictEqual(pick({ reasoning: 'B' }), 'B');
   assert.strictEqual(pick({ reasoning: { content: 'C' } }), 'C', '对象形式不应丢内容');
   assert.strictEqual(pick({}), '');
+});
+
+/* ---------------- 思考强度归一化（bug 5） ---------------- */
+
+const util = require(path.join(ROOT, 'core', 'util.js'));
+
+check('循环依赖：responses 能拿到 aggregateSseToCompletion（bug 4）', () => {
+  // 关键：必须先加载 openai.js 再加载 responses.js，复现 routes.js 的加载顺序。
+  // 旧实现用顶层 require 捕获，此时 openai.js 的 exports 还是空的，
+  // 拿到的是永远为空的对象（Node 会告警 inside circular dependency），
+  // 使 /v1/responses 非流式恒 502。这里直接验证聚合函数真的可用。
+  const openai = require(path.join(ROOT, 'core', 'openai.js'));
+  const responses2 = require(path.join(ROOT, 'core', 'responses.js'));
+  assert.ok(responses2, 'responses 模块应能正常导出');
+  assert.strictEqual(typeof openai.aggregateSseToCompletion, 'function');
+
+  // 真跑一次聚合，确保不是 undefined 调用
+  const sse = [
+    'data: ' + JSON.stringify({ id: 'x', model: 'm', created: 1, choices: [{ delta: { reasoning_content: '想' }, index: 0 }] }),
+    'data: ' + JSON.stringify({ choices: [{ delta: { content: '答' }, finish_reason: 'stop', index: 0 }] }),
+    'data: [DONE]', '',
+  ].join('\n');
+  const c = openai.aggregateSseToCompletion(sse);
+  assert.strictEqual(c.choices[0].message.content, '答');
+  assert.strictEqual(c.choices[0].message.reasoning_content, '想');
+});
+
+check('思考强度：显式档位原文透传', () => {
+  const p = { reasoning_effort: 'high' };
+  assert.strictEqual(util.resolveReasoningEffort(p, 'medium'), 'high');
+  assert.strictEqual(p.reasoning_effort, 'high');
+});
+
+check('思考强度：reasoning:{effort} 转成 reasoning_effort', () => {
+  const p = { reasoning: { effort: 'low' } };
+  assert.strictEqual(util.resolveReasoningEffort(p, 'medium'), 'low');
+  assert.strictEqual(p.reasoning_effort, 'low');
+  assert.strictEqual(p.reasoning, undefined, 'reasoning 对象必须删掉，否则上游可能拒绝');
+});
+
+check('思考强度：未指定时回落到默认档位', () => {
+  const p = {};
+  assert.strictEqual(util.resolveReasoningEffort(p, 'medium'), 'medium');
+  assert.strictEqual(p.reasoning_effort, 'medium');
+});
+
+check('思考强度：bool/对象等非字符串不再透传（原先 400）', () => {
+  // 上游是 Go string 字段，传 bool 会 400 11101
+  const p1 = { reasoning_effort: true };
+  util.resolveReasoningEffort(p1, 'medium');
+  assert.strictEqual(typeof p1.reasoning_effort, 'string', '不得把 bool 发给上游');
+
+  const p2 = { reasoning: { max_tokens: 2000 } };
+  util.resolveReasoningEffort(p2, 'medium');
+  assert.strictEqual(typeof p2.reasoning_effort === 'string' || p2.reasoning_effort === undefined, true);
+  assert.strictEqual(p2.reasoning, undefined);
+});
+
+check('思考强度：显式关闭时不发该字段', () => {
+  for (const payload of [
+    { reasoning_effort: '' },
+    { reasoning_effort: 'none' },
+    { reasoning_effort: 'off' },
+    { reasoning: false },
+    { thinking: { type: 'disabled' } },
+  ]) {
+    const p = { ...payload };
+    assert.strictEqual(util.resolveReasoningEffort(p, 'medium'), undefined,
+      `${JSON.stringify(payload)} 应视为关闭思考`);
+    assert.strictEqual(p.reasoning_effort, undefined, '关闭时不应写入 reasoning_effort');
+  }
+});
+
+check('思考强度：显式开启但无档位时用默认档', () => {
+  const p = { thinking: { type: 'enabled' } };
+  assert.strictEqual(util.resolveReasoningEffort(p, 'medium'), 'medium');
+});
+
+check('思考强度：数字档位映射到上游字符串', () => {
+  assert.strictEqual(util.resolveReasoningEffort({ reasoning_effort: 1 }, 'medium'), 'minimal');
+  assert.strictEqual(util.resolveReasoningEffort({ reasoning_effort: 5 }, 'medium'), 'high');
+});
+
+check('思考强度：清理后不留任何非法别名', () => {
+  const p = { reasoning_effort: 'high', reasoning: { effort: 'low' }, thinking: { type: 'enabled' }, enableThinking: true };
+  util.resolveReasoningEffort(p, 'medium');
+  for (const k of ['reasoning', 'reasoningEffort', 'thinking', 'enableThinking']) {
+    assert.strictEqual(k in p, false, `残留字段 ${k} 可能触发上游 400`);
+  }
+  assert.strictEqual(p.reasoning_effort, 'high');
+});
+
+check('角色：developer 改写成 system（原先 400 11128）', () => {
+  // 上游不认 OpenAI 的 developer 角色：system → 200，developer → 400 11128。
+  // 推理模型下 pi-ai 会把系统提示词发成 developer，因此必须就地改写。
+  const p = { messages: [{ role: 'developer', content: 't' }, { role: 'user', content: 'hi' }] };
+  assert.strictEqual(util.normalizeDeveloperRole(p), 1);
+  assert.strictEqual(p.messages[0].role, 'system', 'developer 必须改写成 system');
+  assert.strictEqual(p.messages[0].content, 't', '内容必须原样保留');
+  assert.strictEqual(p.messages[1].role, 'user', '其它角色不得受影响');
+});
+
+check('角色：多条 developer 全部改写', () => {
+  const p = { messages: [{ role: 'developer', content: 'a' }, { role: 'developer', content: 'b' }] };
+  assert.strictEqual(util.normalizeDeveloperRole(p), 2);
+  assert.deepStrictEqual(p.messages.map((m) => m.role), ['system', 'system']);
+});
+
+check('角色：system/assistant/tool 不受影响', () => {
+  const p = { messages: [{ role: 'system', content: 'a' }, { role: 'assistant', content: 'b' }, { role: 'tool', content: 'c' }] };
+  assert.strictEqual(util.normalizeDeveloperRole(p), 0);
+  assert.deepStrictEqual(p.messages.map((m) => m.role), ['system', 'assistant', 'tool']);
+});
+
+check('角色：畸形请求体不抛异常', () => {
+  for (const bad of [null, undefined, 'x', 42, {}, { messages: null }, { messages: 'x' }, { messages: [null] }]) {
+    assert.strictEqual(util.normalizeDeveloperRole(bad), 0, `畸形输入不应抛异常: ${JSON.stringify(bad)}`);
+  }
 });
 
 /* ---------------- 端到端：SSE 序列自洽性 ---------------- */

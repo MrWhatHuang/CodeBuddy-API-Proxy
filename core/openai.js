@@ -102,6 +102,14 @@ async function handleProxy(req, res, pathname) {
   if (cfg.forceModel) payload.model = cfg.forceModel;
   else if (!payload.model) payload.model = cfg.defaultModel || 'default';
 
+  // 思考强度归一化：上游只认 `reasoning_effort` 字符串，传 bool 等类型会 400；
+  // 且只有带上非空 effort 才会返回 reasoning_content（详见 util.resolveReasoningEffort）。
+  util.resolveReasoningEffort(payload, cfg.defaultReasoningEffort);
+
+  // 角色归一化：上游不认 OpenAI 的 `developer` 角色（400 11128），而推理模型下
+  // 下游客户端常把系统提示词发成 `developer`（详见 util.normalizeDeveloperRole）。
+  util.normalizeDeveloperRole(payload);
+
   const isStream = payload.stream === true;
   const isChat = upstreamPath === '/v2/chat/completions';
   const needAggregate = isChat && !isStream;
