@@ -198,6 +198,7 @@ cd /tmp && OPENAI_API_KEY=dummy codex exec --skip-git-repo-check --ephemeral -s 
 | 改解密策略        | `decryptSafeStorage`（第 349 行），用 `JSON.parse` 判定策略对错                                               |
 | 调试 Codex 请求   | 设 `CODEBUDDY_DEBUG=1`，读 `/tmp/codebuddy-debug-last.json`                                                   |
 | 改版本检查 / 自更新 | `core/update.js`（`checkRemoteVersion` / `applyUpdate`）+ `core/routes.js` 的 `/api/update/*`；前端在 `web/src/components/TopBar.vue` |
+| 改「重新登录账号」  | `core/auth.js` 的 `completeLogin(state, name, opts)`（带 `opts.accountId` 即走覆盖分支）+ `applyLoginResult`；路由 `POST /api/accounts/:id/relogin`（`core/routes.js`）；前端 `web/src/views/AccountsView.vue` 的 `openRelogin` / `doRelogin`；测试 `scripts/test-relogin.js` |
 | 发版 / 改版本号   | `package.json` 的 `version`（唯一来源，见第 10.1 节）；改完必须重新 `npm run build`                            |
 
 ## 10. 约定与规范
@@ -247,6 +248,8 @@ git diff HEAD~1 -- core/store.js core/responses.js | grep -E "^\+.*(CREATE TABLE
 # 4) 只是修 bug / 重构 / 文案？（PATCH）
 git diff HEAD~1 --stat
 ```
+
+**新增功能必须配套测试**：`core/` 下新增可测逻辑时，同步补进 `scripts/`（账号池/登录态 → `test-account-pool.js` 或 `test-relogin.js`；转换层 → `test-responses.js`），并把新脚本加进 `package.json` 的 `test` 串。像「重新登录」这种要走真实 HTTP + 上游交互的功能，用 `http.createServer` 起一个假上游（把 `CODEBUDDY_ENDPOINT` 指过去，见 `scripts/test-relogin.js`），**不要打真实上游**。
 
 **典型误判（真实踩过，务必避开）**：
 

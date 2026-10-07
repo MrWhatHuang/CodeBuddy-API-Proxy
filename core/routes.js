@@ -626,10 +626,37 @@ async function route(req, res) {
     if (!state) { util.sendJson(res, 400, { error: '缺少 state 参数' }); return; }
     const entry = auth.pendingLogins.get(state);
     if (!entry) { util.sendJson(res, 404, { error: '未知 state' }); return; }
-    if (entry.status === 'success') { util.sendJson(res, 200, { status: 'success', accountId: entry.accountId, account: entry.account }); auth.pendingLogins.delete(state); return; }
+    if (entry.status === 'success') {
+      // relogin=true 表示这次登录是「重新登录已有账号」，用于前端区分提示文案
+      util.sendJson(res, 200, {
+        status: 'success',
+        accountId: entry.accountId,
+        account: entry.account,
+        relogin: !!entry.relogin,
+        uidChanged: !!entry.uidChanged,
+      });
+      auth.pendingLogins.delete(state);
+      return;
+    }
     if (entry.status === 'error') { util.sendJson(res, 200, { status: 'error', error: entry.error }); auth.pendingLogins.delete(state); return; }
     if (Date.now() - entry.startedAt > config.LOGIN_TIMEOUT_MS) { entry.status = 'timeout'; util.sendJson(res, 200, { status: 'timeout', error: '登录超时' }); auth.pendingLogins.delete(state); return; }
     util.sendJson(res, 200, { status: 'pending' });
+    return;
+  }
+
+  /* ---- 重新登录指定账号：走一遍 OAuth，成功后覆盖该账号登录态（名称 / 冻结 / 用量统计保留） ---- */
+  if (pathname.startsWith('/api/accounts/') && pathname.endsWith('/relogin') && method === 'POST') {
+    const id = decodeURIComponent(pathname.slice('/api/accounts/'.length, -'/relogin'.length));
+    const acct = sessionMod.getAccount(id);
+    if (!acct) { util.sendJson(res, 404, { error: { message: '未找到该账号' } }); return; }
+    try {
+      const data = await auth.fetchAuthState();
+      auth.pendingLogins.set(data.state, {
+        status: 'pending', startedAt: Date.now(), name: acct.name || '', accountId: acct.id, relogin: true,
+      });
+      auth.completeLogin(data.state, acct.name || '', { accountId: acct.id });
+      util.sendJson(res, 200, { state: data.state, authUrl: data.authUrl, accountId: acct.id, name: acct.name || '' });
+    } catch (e) { util.sendJson(res, 502, { error: e.message }); }
     return;
   }
 

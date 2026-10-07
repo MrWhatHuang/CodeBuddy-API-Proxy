@@ -8,7 +8,7 @@
 
 ## 核心特性
 
-1. **内置 OAuth 登录**：管理页「账号管理」里点「添加账号」即弹出浏览器完成 CodeBuddy OAuth 登录，支持添加多个账号组成**账号池**（轮询 / 额度加权 / 最省优先三种选号策略，可指定账号）。
+1. **内置 OAuth 登录**：管理页「账号管理」里点「添加账号」即弹出浏览器完成 CodeBuddy OAuth 登录，支持添加多个账号组成**账号池**（轮询 / 额度加权 / 最省优先三种选号策略，可指定账号）。账号 token 失效时可在同一行点「重新登录」换一份新的登录态。
 2. **会话粘性**：同一个任务（同一段对话）自始至终使用同一个账号，**不会跑到一半换号**，从而保住上游的上下文缓存。可选定时切换与失败转移。
 3. **VSCode 登录态读取（可选）**：macOS 上可一键从 VSCode / Cursor 等插件的 SecretStorage 解密 CodeBuddy token 导入账号；也可粘贴 `refresh_token` 手工导入。
 4. **每日自动签到**：账号管理页顶部有全局「自动签到」开关（默认开启），服务端按北京时间每天在随机时间自动执行签到，错过窗口会补签。
@@ -32,7 +32,7 @@ pnpm start             # node server.js，默认 http://127.0.0.1:3800
 | `pnpm start` | 启动代理；管理页来自 `dist/` |
 | `pnpm run build` | 构建管理页 |
 | `pnpm run dev` | 只起 Vite（`:5173`），API 代理到 `:3800`，需另开终端 `pnpm start` |
-| `pnpm test` | 语法检查（`server.js` + `core/**` 自动遍历）+ 账号池策略回归测试 + Responses 转换层 / 版本更新回归测试（`scripts/`） |
+| `pnpm test` | 语法检查（`server.js` + `core/**` 自动遍历）+ 账号池策略回归测试 + 重新登录回归测试 + Responses 转换层 / 版本更新回归测试（`scripts/`） |
 
 > **服务端本身零依赖**：`core/**` 与 `server.js` 只 `require` Node 内置模块（`http`/`fs`/`crypto`/`node:sqlite` 等），运行时不加载任何 npm 包。`node_modules` 仅用于构建前端（`vite`/`sass`/`vue` 等会被打包进 `dist/`）。
 > 因此**部署服务器可以不装依赖** —— 只要把本地构建好的 `dist/` 传上去即可；`pnpm install` 只在需要构建前端时才跑。
@@ -61,7 +61,7 @@ CODEBUDDY_NO_OPEN=1 pnpm start
 | 路径 | 页面 |
 |---|---|
 | `/home` | 总览：登录状态、代理地址、curl 示例、接口一览、Token 消耗趋势图（可按 OAuth 账号 / API 密钥维度切换） |
-| `/accounts` | 账号管理：OAuth 登录 / 从 VSCode 读取 / 手工导入、账号池策略（消耗模式 / 选号策略 / 会话粘性 / 定时切换 / 失败转移，均带 `?` 帮助）、**顶部全局自动签到开关**、签到状态与积分余额、账号冷却标记、活跃会话查看 |
+| `/accounts` | 账号管理：OAuth 登录 / 从 VSCode 读取 / 手工导入 / **重新登录**、账号池策略（消耗模式 / 选号策略 / 会话粘性 / 定时切换 / 失败转移，均带 `?` 帮助）、**顶部全局自动签到开关**、签到状态与积分余额、账号冷却标记、活跃会话查看 |
 | `/apikeys` | API 密钥：新增 / 删除 / 重新生成多个密钥、校验开关 |
 | `/usage` | 使用记录：请求与 token 用量明细、按账号 / 密钥 / 模型筛选、CSV 导出 |
 | `/models` | 模型列表（浏览器访问为页面；`Accept: application/json` 时仍返回模型 JSON） |
@@ -90,6 +90,25 @@ CODEBUDDY_NO_OPEN=1 pnpm start
 - 账号列表会显示「今日已签」或「今日未签 · 预计 HH:mm 自动签到」。
 - 也可随时点账号行内的「签到」按钮手动签到；顶部开关只影响后台自动任务，不影响手动签到。
 - 可用环境变量 `CODEBUDDY_TZ` 覆盖签到时区（默认 `Asia/Shanghai`）。
+
+## 重新登录账号
+
+账号列表每行都有「重新登录」按钮，用于**给已有账号换一份新的登录态**，而不是新增账号。
+
+适用场景：
+
+- 账号 token 长期失效（上游一直返回 401/403，或 refresh_token 过期），手动刷新也救不回来；
+- 想把某个槽位换成另一个 CodeBuddy 账号，但不想丢掉这个槽位的历史统计。
+
+行为：
+
+1. 点「重新登录」确认后，弹出与「添加账号」相同的浏览器 OAuth 登录页；
+2. 登录完成后，新登录态**就地覆盖**该账号的 `accessToken` / `refreshToken` / 账号资料（uid、昵称）；
+3. **保留**：账号名称、冻结状态、自动签到配置、调用次数与最近使用时间；
+4. 成功后自动清除该账号的失败转移冷却标记（若它正被冻结，冻结状态仍保留，需手动解冻）；
+5. 若本次登录的 **uid 与原账号不同**（登错了账号），页面会明确提示，并且**不会继承**旧的 `domain` / `refreshToken`，避免把两个账号的凭证串在一起。
+
+> 与「删除后重新添加」的区别：重新登录不会新建账号，因此账号池策略、API 密钥上的账号绑定（`accountId`）与用量统计都不会断链。
 
 ## 积分与今日消耗
 
@@ -563,7 +582,8 @@ sqlite3 ~/.codebuddy-proxy/proxy.db "DELETE FROM admin_users; DELETE FROM admin_
 | PUT | `/api/accounts` | 全局自动签到开关（body `{ autoCheckin }`） |
 | PUT | `/api/accounts/:id` | 重命名（body `{ name }`） |
 | POST | `/api/accounts/login` | 发起 OAuth 登录，返回 `authUrl` |
-| GET | `/api/accounts/login/status` | 查询 OAuth 登录进度 |
+| GET | `/api/accounts/login/status` | 查询 OAuth 登录进度（重新登录时多返回 `relogin` / `uidChanged`） |
+| POST | `/api/accounts/:id/relogin` | 重新登录指定账号：发起 OAuth，成功后用新登录态覆盖该账号（保留名称/冻结/签到/用量统计），返回 `authUrl` |
 | POST | `/api/accounts/import` | 用 refresh_token 手工导入账号 |
 | DELETE | `/api/accounts/:id` | 删除账号（同时清理其签到状态、积分快照与会话绑定） |
 | GET | `/api/pool` | 读取账号池配置（含粘性/策略/定时切换/失败转移字段） |
@@ -699,7 +719,8 @@ web/               管理页源码（Vite + Vue）
 dist/              管理页构建产物
 scripts/           校验脚本
   check-all.js     语法检查（server.js + core/ 遍历）
-  test-account-pool.js  账号池策略回归测试（会话粘性 / 定时切换 / 健康度 / 选号）
+  test-account-pool.js  账号池策略回归测试（会话粘性 / 定时切换 / 健康度 / 选号 / 重新登录状态迁移）
+  test-relogin.js   重新登录回归测试（假上游跑完整 OAuth，验证覆盖 / 保留字段 / 失败不破坏原登录态）
   test-responses.js  Responses 转换层回归测试
   test-update.js   版本比较与自更新护栏测试
 ```

@@ -539,6 +539,99 @@ ok('显式指定账号仍可使用被冻结的账号', () => {
   assert.strictEqual(found.id, 'a2');
 });
 
+console.log('\n[9] 重新登录（用新登录态覆盖已有账号）');
+
+/** 构造一份「上游 OAuth 登录返回」的结构 */
+function loginResult(uid, token, extra) {
+  return Object.assign({
+    account: { uid, nickname: 'nick_' + uid, type: 'personal', enterpriseId: '' },
+    auth: { accessToken: token, refreshToken: 'rt_' + uid, domain: 'copilot.tencent.com', expiresAt: Date.now() + 3600e3 },
+    accounts: [{ id: uid }],
+  }, extra || {});
+}
+
+ok('重新登录覆盖 token，保留名称 / 冻结 / 签到与用量统计', () => {
+  resetPool();
+  sessionMod.updateAccount('a2', { name: '公司号', frozen: true, autoCheckin: false, lastUsedAt: 123, useCount: 9 });
+  sessionMod.markUnhealthy('a2', 60 * 1000, 'auth:401');
+  const acct = sessionMod.getAccount('a2');
+  const applied = auth.applyLoginResult(acct, loginResult('uid_a2', 'newtok'));
+  assert.ok(applied, '应返回应用结果');
+  assert.strictEqual(applied.uidChanged, false, 'uid 相同不算换号');
+  const after = sessionMod.getAccount('a2');
+  assert.strictEqual(after.auth.accessToken, 'newtok', 'accessToken 应被替换');
+  assert.strictEqual(after.name, '公司号', '名称应保留');
+  assert.strictEqual(after.frozen, true, '冻结状态应保留');
+  assert.strictEqual(after.autoCheckin, false, '签到配置应保留');
+  assert.strictEqual(after.useCount, 9, '用量统计应保留');
+  assert.strictEqual(after.lastUsedAt, 123, '最近使用时间应保留');
+  assert.strictEqual(sessionMod.getUnhealthy('a2'), null, '重新登录成功应清除冷却标记');
+});
+
+ok('重新登录的账号数量不变（不会新增账号）', () => {
+  resetPool();
+  const before = sessionMod.listAccounts().length;
+  auth.applyLoginResult(sessionMod.getAccount('a1'), loginResult('uid_a1', 'tok2'));
+  assert.strictEqual(sessionMod.listAccounts().length, before, '应就地更新而不是追加');
+  assert.ok(sessionMod.getAccount('a1'), '原账号 id 仍可查到');
+});
+
+ok('重新登录持久化到数据库，重新载入后仍是新 token', () => {
+  resetPool();
+  auth.applyLoginResult(sessionMod.getAccount('a3'), loginResult('uid_a3', 'persisted_tok'));
+  sessionMod.loadSession();
+  assert.strictEqual(sessionMod.getAccount('a3').auth.accessToken, 'persisted_tok', '新 token 应落库');
+});
+
+ok('uid 变化时不继承旧的 refreshToken 与 domain（避免串号）', () => {
+  resetPool();
+  sessionMod.updateAccount('a1', { auth: { accessToken: 'old', refreshToken: 'old_rt', domain: 'old.example.com' } });
+  const applied = auth.applyLoginResult(sessionMod.getAccount('a1'), {
+    account: { uid: 'someone_else', nickname: 'x', type: 'personal' },
+    auth: { accessToken: 'brand_new' },   // 上游未回传 refreshToken / domain
+    accounts: [],
+  });
+  assert.strictEqual(applied.uidChanged, true, 'uid 不同应被识别');
+  const after = sessionMod.getAccount('a1');
+  assert.ok(!after.auth.refreshToken, '不应继承旧 refreshToken');
+  assert.notStrictEqual(after.auth.domain, 'old.example.com', '不应继承旧 domain');
+  assert.strictEqual(after.account.uid, 'someone_else', '账号信息应更新为新登录的账号');
+});
+
+ok('uid 相同且上游未回传 refreshToken / domain 时沿用旧值', () => {
+  resetPool();
+  sessionMod.updateAccount('a1', { auth: { accessToken: 'old', refreshToken: 'keep_rt', domain: 'keep.example.com' } });
+  auth.applyLoginResult(sessionMod.getAccount('a1'), {
+    account: { uid: 'uid_a1', nickname: 'x', type: 'personal' },
+    auth: { accessToken: 'fresh' },
+    accounts: [],
+  });
+  const after = sessionMod.getAccount('a1');
+  assert.strictEqual(after.auth.refreshToken, 'keep_rt', 'refreshToken 应沿用');
+  assert.strictEqual(after.auth.domain, 'keep.example.com', 'domain 应沿用');
+});
+
+ok('无 accessToken 的登录结果被拒绝（不破坏现有登录态）', () => {
+  resetPool();
+  const applied = auth.applyLoginResult(sessionMod.getAccount('a1'), { account: { uid: 'uid_a1' }, auth: {}, accounts: [] });
+  assert.strictEqual(applied, null, '无 accessToken 应返回 null');
+  assert.strictEqual(sessionMod.getAccount('a1').auth.accessToken, 'tok_a1', '原 token 不应被清掉');
+});
+
+ok('重新登录解冻后的账号会重新参与池轮询', () => {
+  resetPool();
+  sessionMod.updateAccount('a2', { frozen: true });
+  sessionMod.markUnhealthy('a2', 365 * 24 * 60 * 60 * 1000, 'frozen:manual');
+  auth.applyLoginResult(sessionMod.getAccount('a2'), loginResult('uid_a2', 'tok_new'));
+  // 重新登录只清冷却，不改冻结：冻结仍需用户显式解冻
+  assert.strictEqual(sessionMod.getAccount('a2').frozen, true, '冻结是用户显式意图，重新登录不改动');
+  sessionMod.updateAccount('a2', { frozen: false });
+  sessionMod.markHealthy('a2');
+  const seen = new Set();
+  for (let i = 0; i < 9; i++) seen.add(sessionMod.pickAccount(null, '').id);
+  assert.ok(seen.has('a2'), '解冻后应能重新被选中');
+});
+
 // 清理
 try { sessionMod.clearSession(); } catch { /* ignore */ }
 try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }

@@ -289,9 +289,47 @@ async function fetchAccountByToken(auth) {
   return r.json.data;
 }
 
-/** 登录成功后把账号追加进池（携带 name 参数） */
-async function completeLogin(state, name) {
+/**
+ * 用一次 OAuth 登录结果**更新已存在的账号**（重新登录）。
+ * 只替换登录态（auth / account / accounts），保留名称、冻结状态、签到配置与用量统计。
+ *
+ * uid 变化（本次登录的账号和原账号不是同一个）时**不继承**旧 domain / refreshToken：
+ * 否则会把 A 账号的 refresh_token 写到 B 账号上，后续刷新会静默串号。
+ *
+ * @param {object} acct 已存在的账号对象（会被就地修改并持久化）
+ * @param {object} result { account, auth, accounts }
+ * @returns {{ acct: object, uidChanged: boolean }|null} 结果非法时返回 null
+ */
+function applyLoginResult(acct, result) {
+  if (!acct || !result || !result.auth || !result.auth.accessToken) return null;
+  const before = acct.account || {};
+  const next = result.account || {};
+  const uidChanged = !!(before.uid && next.uid && before.uid !== next.uid);
+  const oldAuth = acct.auth || {};
+  const nextAuth = Object.assign({}, result.auth);
+  if (!uidChanged) {
+    if (!nextAuth.domain && oldAuth.domain) nextAuth.domain = oldAuth.domain;
+    if (!nextAuth.refreshToken && oldAuth.refreshToken) nextAuth.refreshToken = oldAuth.refreshToken;
+  }
+  acct.auth = nextAuth;
+  acct.account = Object.assign({}, before, next);
+  if (Array.isArray(result.accounts)) acct.accounts = result.accounts;
+  sessionMod.updateAccount(acct.id, { auth: acct.auth, account: acct.account });
+  // 重新登录成功说明登录态已恢复：顺手清掉失败转移留下的冷却标记
+  sessionMod.markHealthy(acct.id);
+  return { acct, uidChanged };
+}
+
+/**
+ * 登录成功后写入账号池。
+ * 默认追加一个新账号；带 opts.accountId 时改为更新该账号的登录态（重新登录）。
+ * @param {string} state
+ * @param {string} [name] 账号名称（重新登录时仅作为兜底，已有名称不会被覆盖）
+ * @param {{ accountId?: string }} [opts]
+ */
+async function completeLogin(state, name, opts) {
   const entry = pendingLogins.get(state);
+  const targetId = (opts && opts.accountId) ? String(opts.accountId) : '';
   try {
     const auth = await pollAuthToken(state);
     if (!auth || auth.__error) { if (entry) { entry.status = 'error'; entry.error = (auth && auth.__error) || '未知错误'; } return; }
@@ -299,6 +337,26 @@ async function completeLogin(state, name) {
     try { account = await fetchAccount(state, auth); }
     catch (e) { logger.log('warn', 'auth', '获取账号信息失败: ' + e.message); account = { uid: '', nickname: '', type: 'personal' }; }
     const accounts = await fetchAccounts(auth).catch(function () { return []; });
+
+    /* ---- 重新登录：覆盖已有账号的登录态 ---- */
+    if (targetId) {
+      const existing = sessionMod.getAccount(targetId);
+      if (!existing) throw new Error('账号已不存在，登录态未写入');
+      const applied = applyLoginResult(existing, { account, auth, accounts });
+      if (!applied) throw new Error('登录态无效，账号更新失败');
+      const label = applied.acct.name || applied.acct.account.nickname || applied.acct.account.uid;
+      if (entry) {
+        entry.status = 'success';
+        entry.accountId = applied.acct.id;
+        entry.account = applied.acct;
+        entry.uidChanged = applied.uidChanged;
+        entry.uid = applied.acct.account.uid || '';
+      }
+      logger.log('info', 'auth', '账号重新登录成功: ' + label + (applied.uidChanged ? '（本次登录的 uid 与原账号不同）' : ''));
+      return;
+    }
+
+    /* ---- 新增账号 ---- */
     const acct = sessionMod.addAccount({
       name: (name && String(name).trim()) || '',
       source: 'oauth',
@@ -402,6 +460,7 @@ module.exports = {
   recordUpstreamFailure, recordUpstreamSuccess,
   verifyClientKey,
   fetchAuthState, pollAuthToken, fetchAccount, fetchAccounts, completeLogin,
+  applyLoginResult,
   importByRefreshToken, fetchAccountByToken,
   pendingLogins,
 };

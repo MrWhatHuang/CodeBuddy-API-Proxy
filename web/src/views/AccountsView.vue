@@ -31,6 +31,12 @@ const importing = ref(false);
 const showVscode = ref(false);
 const importingVscode = ref(false);
 
+// 重新登录：把某个已有账号的登录态换成新登录的结果（名称 / 冻结状态 / 用量统计保留）
+const showRelogin = ref(false);
+const reloginTarget = ref(null);
+const reloginId = ref('');
+const reloginWaiting = ref(false);
+
 // 账号池策略设置：收起为一个设置按钮，点击后以气泡展示各项设置
 const showPoolSettings = ref(false);
 const poolSettingsRef = ref(null);
@@ -316,6 +322,7 @@ async function openAdd() {
   showAdd.value = true;
   showImport.value = false;
   showVscode.value = false;
+  showRelogin.value = false;
   newName.value = '';
 }
 
@@ -336,6 +343,7 @@ async function openImport() {
   showImport.value = true;
   showAdd.value = false;
   showVscode.value = false;
+  showRelogin.value = false;
   importRt.value = '';
   importName.value = '';
   importDomain.value = '';
@@ -345,6 +353,7 @@ async function openVscode() {
   showVscode.value = true;
   showAdd.value = false;
   showImport.value = false;
+  showRelogin.value = false;
 }
 
 async function doVscodeImport() {
@@ -384,23 +393,66 @@ async function doImport() {
   }
 }
 
-function pollLogin(state) {
+function pollLogin(state, opts = {}) {
   const timer = setInterval(async () => {
     try {
       const sd = await api.accountLoginStatus(state);
       if (sd.status === 'success') {
         clearInterval(timer);
-        notice.value = t('accounts.loginOk');
+        if (opts.relogin) {
+          notice.value = sd.uidChanged
+            ? t('accounts.reloginOkUidChanged', { name: opts.name })
+            : t('accounts.reloginOk', { name: opts.name });
+          showRelogin.value = false;
+        } else {
+          notice.value = t('accounts.loginOk');
+        }
         load();
       } else if (sd.status === 'error' || sd.status === 'timeout') {
         clearInterval(timer);
-        notice.value = t('common.error') + ': ' + (sd.error || t('login.timeout'));
+        notice.value = (opts.relogin ? t('accounts.reloginFail') + '：' : '')
+          + t('common.error') + ': ' + (sd.error || t('login.timeout'));
+        if (opts.relogin) load();
       }
     } catch (e) {
       clearInterval(timer);
       notice.value = t('common.error') + ': ' + e.message;
     }
   }, 2000);
+}
+
+/** 打开「重新登录」确认卡片 */
+function openRelogin(acct) {
+  showRelogin.value = true;
+  showAdd.value = false;
+  showImport.value = false;
+  showVscode.value = false;
+  reloginTarget.value = acct;
+  notice.value = '';
+}
+
+/**
+ * 重新登录指定账号：发起一次 OAuth（与「添加账号」同一个流程），
+ * 成功后由服务端把新登录态覆盖到该账号上，而不是新增一个账号。
+ */
+async function doRelogin() {
+  const acct = reloginTarget.value;
+  if (!acct || reloginId.value) return;
+  reloginId.value = acct.id;
+  reloginWaiting.value = true;
+  notice.value = '';
+  try {
+    const d = await api.reloginAccount(acct.id);
+    window.open(d.authUrl, '_blank');
+    notice.value = t('accounts.reloginStarted', { name: acct.name });
+    showRelogin.value = false;
+    pollLogin(d.state, { relogin: true, name: acct.name || acct.nickname || acct.uid });
+  } catch (e) {
+    notice.value = t('accounts.reloginFail') + '：' + e.message;
+  } finally {
+    reloginId.value = '';
+    reloginWaiting.value = false;
+  }
 }
 
 async function onAutoCheckinChange(ev) {
@@ -729,6 +781,12 @@ load();
                   :title="isFrozen(a) ? t('accounts.unfreezeHint') : t('accounts.freezeHint')"
                   @click="toggleFreeze(a)"
                 >{{ isFrozen(a) ? t('accounts.unfreeze') : t('accounts.freeze') }}</button>
+                <button
+                  class="btn btn-ghost btn-sm"
+                  :disabled="!!reloginId"
+                  :title="t('accounts.reloginHint')"
+                  @click="openRelogin(a)"
+                >{{ reloginId === a.id ? t('accounts.reloginDoing') : t('accounts.relogin') }}</button>
                 <button class="btn btn-ghost btn-sm" @click="rename(a)">{{ t('common.edit') }}</button>
                 <button class="btn btn-danger btn-sm" @click="remove(a)">{{ t('common.delete') }}</button>
               </td>
@@ -769,6 +827,22 @@ load();
       <div class="actions">
         <button class="btn btn-primary" :disabled="importingVscode" @click="doVscodeImport">{{ importingVscode ? t('accounts.vscodeReading') : t('accounts.vscodeConfirm') }}</button>
         <button class="btn btn-ghost" @click="showVscode = false">{{ t('common.cancel') }}</button>
+      </div>
+    </div>
+
+    <div v-if="showRelogin" class="card add-card">
+      <h3 class="card-title">{{ t('accounts.reloginTitle') }}</h3>
+      <p class="relogin-target">
+        {{ t('accounts.reloginTarget') }}
+        <b>{{ reloginTarget?.name || reloginTarget?.nickname || reloginTarget?.uid || '-' }}</b>
+        <span v-if="reloginTarget?.uid" class="muted">（{{ reloginTarget.uid }}）</span>
+      </p>
+      <p class="hint">{{ t('accounts.reloginHint') }}</p>
+      <div class="actions">
+        <button class="btn btn-primary" :disabled="reloginWaiting" @click="doRelogin">
+          {{ reloginWaiting ? t('accounts.reloginStarting') : t('accounts.reloginStart') }}
+        </button>
+        <button class="btn btn-ghost" @click="showRelogin = false">{{ t('common.cancel') }}</button>
       </div>
     </div>
 
@@ -900,6 +974,7 @@ tr.pinned td { background: var(--primary-soft); }
 .credits-today b { color: var(--warning, #d29922); font-weight: 600; }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
 .add-card { margin-top: 16px; }
+.relogin-target { margin: 4px 0 8px; font-size: 13px; }
 .input { width: 100%; max-width: 420px; }
 .textarea { min-height: 90px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; resize: vertical; }
 .actions { display: flex; gap: 10px; margin-top: 14px; }
