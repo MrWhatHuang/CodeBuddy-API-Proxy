@@ -271,27 +271,57 @@ function responsesToChatInput(p) {
     chat.messages.push({ role: 'user', content: input });
   } else if (Array.isArray(input)) {
     let pendingToolCalls = [];
+    // 夹在 function_call 与其 function_call_output 之间的 assistant 文本。
+    // OpenAI 协议要求 role:'tool' 必须紧跟带对应 tool_calls 的 assistant 消息，
+    // 中间插一条普通 assistant 消息会让上游判定
+    // "tool calls and tool results do not match"（CodeBuddy 报 11148）。
+    // 严格校验的模型（deepseek-v4-pro / minimax-m3）会直接 400，
+    // 宽松的模型（glm-5.2 / kimi）则能容忍——这正是「部分模型出问题」的原因。
+    // 因此这里把待插入的文本挂起到 flushToolCalls，由它合并进同一条消息。
+    let pendingAssistantText = null;
+
     const flushToolCalls = () => {
+      const text = pendingAssistantText;
+      pendingAssistantText = null;
       if (pendingToolCalls.length) {
-        chat.messages.push({ role: 'assistant', content: null, tool_calls: pendingToolCalls });
+        // 把文本与 tool_calls 合并到同一条 assistant 消息，保持 tool 消息紧随其后。
+        chat.messages.push({ role: 'assistant', content: text, tool_calls: pendingToolCalls });
         pendingToolCalls = [];
+      } else if (text !== null) {
+        chat.messages.push({ role: 'assistant', content: text });
       }
     };
+
+    /** assistant 文本：若正等待 tool_calls 则挂起，否则立即入列 */
+    const pushAssistantText = (content) => {
+      if (pendingToolCalls.length) { pendingAssistantText = content; return; }
+      chat.messages.push({ role: 'assistant', content });
+    };
+
     for (const item of input) {
       if (typeof item === 'string') { flushToolCalls(); chat.messages.push({ role: 'user', content: item }); continue; }
       if (!item || typeof item !== 'object') continue;
 
       if (item.role && item.content !== undefined) {
-        flushToolCalls();
         const isSys = item.role === 'developer' || item.role === 'system';
         const role = item.role === 'developer' ? 'system' : item.role;
+        if (role === 'assistant') {
+          // 不 flush，让文本与随后的 function_call 合并
+          pushAssistantText(contentToChat(item.content, { sanitizeText: isSys }));
+          continue;
+        }
+        flushToolCalls();
         chat.messages.push({ role, content: contentToChat(item.content, { sanitizeText: isSys }) });
         continue;
       }
       if (item.type === 'message') {
-        flushToolCalls();
         const isSys = item.role === 'developer' || item.role === 'system';
         const role = item.role === 'developer' ? 'system' : (item.role || 'user');
+        if (role === 'assistant') {
+          pushAssistantText(contentToChat(item.content, { sanitizeText: isSys }));
+          continue;
+        }
+        flushToolCalls();
         chat.messages.push({ role, content: contentToChat(item.content, { sanitizeText: isSys }) });
       } else if (item.type === 'function_call') {
         // 历史里的 function_call 用的是 Codex 的原始工具名（如 spawn_agent），
