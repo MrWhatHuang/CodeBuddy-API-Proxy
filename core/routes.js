@@ -17,6 +17,7 @@ const vscode = require('./vscode');
 const auth = require('./auth');
 const openai = require('./openai');
 const responses = require('./responses');
+const anthropic = require('./anthropic');
 const checkin = require('./checkin');
 const checkinScheduler = require('./checkinScheduler');
 const credits = require('./credits');
@@ -868,6 +869,9 @@ async function route(req, res) {
     }
     return;
   }
+
+  /* ---- Anthropic Messages API（Claude Code） ---- */
+  if (method === 'POST' && (pathname === '/v1/messages' || pathname === '/messages')) { await anthropic.handleMessages(req, res); return; }
 
   /* ---- Responses API ---- */
   if (method === 'POST' && (pathname === '/v1/responses' || pathname === '/responses')) { await responses.handleResponses(req, res); return; }
